@@ -19,7 +19,7 @@ export function registerChatMember(bot: Bot): void {
       member.status === "administrator" && member.can_invite_users === true;
 
     if (isAdminWithInvite) {
-      const existing = getChannel(chat.id);
+      const existing = await getChannel(chat.id);
 
       // Владелец — создатель канала (creator), а не тот, кто добавил бота:
       // иначе любой со-админ с правом назначать админов мог бы первым застолбить
@@ -44,7 +44,7 @@ export function registerChatMember(bot: Bot): void {
       }
 
       // Каналы и супергруппы всегда имеют title.
-      upsertChannel({
+      await upsertChannel({
         chatId: chat.id,
         title: chat.title,
         type: chat.type,
@@ -71,10 +71,10 @@ export function registerChatMember(bot: Bot): void {
 
     // Бот больше не админ с нужными правами (понизили / kicked / left).
     if (member.status === "left" || member.status === "kicked" || member.status === "member") {
-      deactivateChannel(chat.id);
+      await deactivateChannel(chat.id);
     } else if (member.status === "administrator" && member.can_invite_users !== true) {
       // Остался админом, но без права приглашать — одобрять заявки не сможем.
-      deactivateChannel(chat.id);
+      await deactivateChannel(chat.id);
     }
   });
 }

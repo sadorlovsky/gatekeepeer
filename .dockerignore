@@ -1,0 +1,9 @@
+node_modules
+.git
+.env
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+fly.toml
+.dockerignore
+Dockerfile

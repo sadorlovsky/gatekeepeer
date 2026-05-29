@@ -162,45 +162,45 @@ function eventHarness(): { bot: any; handlers: Record<string, Handler> } {
 }
 
 describe("database migrations", () => {
-  test("migrates legacy schema and backfills stats after deduplication", () => {
-    expect(db.statsByOwner(1)).toEqual([
+  test("migrates legacy schema and backfills stats after deduplication", async () => {
+    expect(await db.statsByOwner(1)).toEqual([
       { chat_id: -100, title: "Owner one", approved: 2 },
     ]);
-    expect(db.statsByOwner(2)).toEqual([
+    expect(await db.statsByOwner(2)).toEqual([
       { chat_id: -200, title: "Owner two", approved: 1 },
     ]);
   });
 });
 
 describe("channel ownership", () => {
-  test("does not transfer ownership when an existing channel is re-registered", () => {
-    db.upsertChannel({
+  test("does not transfer ownership when an existing channel is re-registered", async () => {
+    await db.upsertChannel({
       chatId: -300,
       title: "Original",
       type: "channel",
       addedBy: 1,
     });
-    db.setAutoApprove(-300, 1, false);
+    await db.setAutoApprove(-300, 1, false);
 
-    db.upsertChannel({
+    await db.upsertChannel({
       chatId: -300,
       title: "Renamed",
       type: "channel",
       addedBy: 2,
     });
 
-    const channel = db.getChannel(-300);
+    const channel = await db.getChannel(-300);
     expect(channel?.added_by).toBe(1);
     expect(channel?.title).toBe("Renamed");
     expect(channel?.auto_approve).toBe(0);
-    expect(db.setAutoApprove(-300, 2, true)).toBe(false);
-    expect(db.setAutoApprove(-300, 1, true)).toBe(true);
+    expect(await db.setAutoApprove(-300, 2, true)).toBe(false);
+    expect(await db.setAutoApprove(-300, 1, true)).toBe(true);
   });
 });
 
 describe("join event accounting", () => {
-  test("counts repeated delivery of the same approved request only once", () => {
-    db.upsertChannel({
+  test("counts repeated delivery of the same approved request only once", async () => {
+    await db.upsertChannel({
       chatId: -400,
       title: "Webhook retry",
       type: "channel",
@@ -214,24 +214,24 @@ describe("join event accounting", () => {
       decision: "approved" as const,
       requestedAt: 123_456,
     };
-    db.logJoin(event);
-    db.logJoin(event);
+    await db.logJoin(event);
+    await db.logJoin(event);
 
-    expect(db.statsByOwner(1)).toContainEqual({
+    expect(await db.statsByOwner(1)).toContainEqual({
       chat_id: -400,
       title: "Webhook retry",
       approved: 1,
     });
   });
 
-  test("retention pruning does not change all-time approved stats", () => {
-    const before = db.statsByOwner(1).find((stat) => stat.chat_id === -100);
+  test("retention pruning does not change all-time approved stats", async () => {
+    const before = (await db.statsByOwner(1)).find((stat) => stat.chat_id === -100);
     expect(before?.approved).toBe(2);
 
-    const removed = db.pruneJoinEvents(0);
+    const removed = await db.pruneJoinEvents(0);
     expect(removed).toBeGreaterThan(0);
 
-    const after = db.statsByOwner(1).find((stat) => stat.chat_id === -100);
+    const after = (await db.statsByOwner(1)).find((stat) => stat.chat_id === -100);
     expect(after?.approved).toBe(2);
   });
 });
@@ -275,16 +275,16 @@ describe("commands", () => {
   });
 
   test("channels, status, and stats are scoped to the requesting owner", async () => {
-    db.upsertChannel({ chatId: -500, title: "Owner scoped", type: "channel", addedBy: 50 });
-    db.upsertChannel({ chatId: -501, title: "Other owner", type: "channel", addedBy: 51 });
-    db.logJoin({
+    await db.upsertChannel({ chatId: -500, title: "Owner scoped", type: "channel", addedBy: 50 });
+    await db.upsertChannel({ chatId: -501, title: "Other owner", type: "channel", addedBy: 51 });
+    await db.logJoin({
       chatId: -500,
       userId: 5000,
       username: "owner",
       decision: "approved",
       requestedAt: 5000,
     });
-    db.logJoin({
+    await db.logJoin({
       chatId: -501,
       userId: 5100,
       username: "other",
@@ -360,7 +360,7 @@ describe("callbacks", () => {
   });
 
   test("toggle callback rejects channels owned by someone else", async () => {
-    db.upsertChannel({ chatId: -600, title: "Private toggle", type: "channel", addedBy: 60 });
+    await db.upsertChannel({ chatId: -600, title: "Private toggle", type: "channel", addedBy: 60 });
     const harness = callbackHarness();
     callbacksModule.registerCallbacks(harness.bot);
     const answers: unknown[][] = [];
@@ -375,11 +375,11 @@ describe("callbacks", () => {
     });
 
     expect(answers).toEqual([[{ text: "Этот канал вам не принадлежит." }]]);
-    expect(db.getChannel(-600)?.auto_approve).toBe(1);
+    expect((await db.getChannel(-600))?.auto_approve).toBe(1);
   });
 
   test("toggle callback flips auto approve and refreshes markup for the owner", async () => {
-    db.upsertChannel({ chatId: -601, title: "Toggle me", type: "channel", addedBy: 60 });
+    await db.upsertChannel({ chatId: -601, title: "Toggle me", type: "channel", addedBy: 60 });
     const harness = callbackHarness();
     callbacksModule.registerCallbacks(harness.bot);
     const answers: unknown[][] = [];
@@ -397,7 +397,7 @@ describe("callbacks", () => {
       },
     });
 
-    expect(db.getChannel(-601)?.auto_approve).toBe(0);
+    expect((await db.getChannel(-601))?.auto_approve).toBe(0);
     expect(answers).toEqual([[{ text: "Авто-приём выключен ⛔️" }]]);
     expect(edits[0]?.[0]).toHaveProperty("reply_markup");
   });
@@ -405,10 +405,10 @@ describe("callbacks", () => {
 
 describe("join request handler", () => {
   test("ignores unmanaged, inactive, and disabled channels", async () => {
-    db.upsertChannel({ chatId: -700, title: "Disabled", type: "channel", addedBy: 70 });
-    db.setAutoApprove(-700, 70, false);
-    db.upsertChannel({ chatId: -701, title: "Inactive", type: "channel", addedBy: 70 });
-    db.deactivateChannel(-701);
+    await db.upsertChannel({ chatId: -700, title: "Disabled", type: "channel", addedBy: 70 });
+    await db.setAutoApprove(-700, 70, false);
+    await db.upsertChannel({ chatId: -701, title: "Inactive", type: "channel", addedBy: 70 });
+    await db.deactivateChannel(-701);
 
     const { bot, handlers } = eventHarness();
     joinRequestModule.registerJoinRequest(bot);
@@ -432,7 +432,7 @@ describe("join request handler", () => {
   });
 
   test("approves and records active auto-approve channel requests", async () => {
-    db.upsertChannel({ chatId: -702, title: "Approvals", type: "channel", addedBy: 70 });
+    await db.upsertChannel({ chatId: -702, title: "Approvals", type: "channel", addedBy: 70 });
     const { bot, handlers } = eventHarness();
     joinRequestModule.registerJoinRequest(bot);
     const approvedUsers: number[] = [];
@@ -449,7 +449,7 @@ describe("join request handler", () => {
     });
 
     expect(approvedUsers).toEqual([7020]);
-    expect(db.statsByOwner(70)).toContainEqual({
+    expect(await db.statsByOwner(70)).toContainEqual({
       chat_id: -702,
       title: "Approvals",
       approved: 1,
@@ -479,14 +479,14 @@ describe("chat member handler", () => {
       },
     });
 
-    expect(db.getChannel(-800)?.added_by).toBe(800);
+    expect((await db.getChannel(-800))?.added_by).toBe(800);
     expect(sentMessages[0]?.[0]).toBe(800);
     expect(String(sentMessages[0]?.[1])).toContain("Creator owned");
   });
 
   test("reactivates an existing channel without transferring owner or sending duplicate DM", async () => {
-    db.upsertChannel({ chatId: -801, title: "Existing", type: "channel", addedBy: 810 });
-    db.deactivateChannel(-801);
+    await db.upsertChannel({ chatId: -801, title: "Existing", type: "channel", addedBy: 810 });
+    await db.deactivateChannel(-801);
     const { bot, handlers } = eventHarness();
     chatMemberModule.registerChatMember(bot);
     let adminFetches = 0;
@@ -508,7 +508,7 @@ describe("chat member handler", () => {
       },
     });
 
-    const channel = db.getChannel(-801);
+    const channel = await db.getChannel(-801);
     expect(channel?.active).toBe(1);
     expect(channel?.added_by).toBe(810);
     expect(channel?.title).toBe("Existing renamed");
@@ -517,7 +517,7 @@ describe("chat member handler", () => {
   });
 
   test("skips unsupported chat types and deactivates on permission loss", async () => {
-    db.upsertChannel({ chatId: -802, title: "Permission loss", type: "channel", addedBy: 820 });
+    await db.upsertChannel({ chatId: -802, title: "Permission loss", type: "channel", addedBy: 820 });
     const { bot, handlers } = eventHarness();
     chatMemberModule.registerChatMember(bot);
 
@@ -533,7 +533,7 @@ describe("chat member handler", () => {
       },
     });
 
-    expect(db.getChannel(-803)).toBeNull();
+    expect(await db.getChannel(-803)).toBeNull();
 
     await handlers.my_chat_member?.({
       myChatMember: {
@@ -542,6 +542,6 @@ describe("chat member handler", () => {
       },
     });
 
-    expect(db.getChannel(-802)?.active).toBe(0);
+    expect((await db.getChannel(-802))?.active).toBe(0);
   });
 });

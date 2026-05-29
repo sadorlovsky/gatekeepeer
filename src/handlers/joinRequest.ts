@@ -9,7 +9,7 @@ export function registerJoinRequest(bot: Bot): void {
     const req = ctx.chatJoinRequest;
     if (!req) return;
 
-    const channel = getChannel(req.chat.id);
+    const channel = await getChannel(req.chat.id);
     if (!channel || channel.active === 0 || channel.auto_approve === 0) {
       // Канал не под управлением или приём выключен — оставляем заявку висеть.
       return;
@@ -17,7 +17,7 @@ export function registerJoinRequest(bot: Bot): void {
 
     try {
       await ctx.approveChatJoinRequest(req.from.id);
-      logJoin({
+      await logJoin({
         chatId: req.chat.id,
         userId: req.from.id,
         username: req.from.username ?? null,

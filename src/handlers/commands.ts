@@ -33,7 +33,7 @@ export function registerCommands(bot: Bot): void {
     const userId = ctx.from?.id;
     if (!userId) return;
 
-    const channels = listChannelsByOwner(userId);
+    const channels = await listChannelsByOwner(userId);
     if (channels.length === 0) {
       await ctx.reply(
         "У вас пока нет подключённых каналов. Добавьте меня админом с правом приглашать — и канал появится здесь.",
@@ -52,7 +52,7 @@ export function registerCommands(bot: Bot): void {
     const userId = ctx.from?.id;
     if (!userId) return;
 
-    const channels = listChannelsByOwner(userId);
+    const channels = await listChannelsByOwner(userId);
     if (channels.length === 0) {
       await ctx.reply("Нет подключённых каналов.");
       return;
@@ -70,7 +70,7 @@ export function registerCommands(bot: Bot): void {
     const userId = ctx.from?.id;
     if (!userId) return;
 
-    const stats = statsByOwner(userId);
+    const stats = await statsByOwner(userId);
     if (stats.length === 0) {
       await ctx.reply("Нет подключённых каналов.");
       return;

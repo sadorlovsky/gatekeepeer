@@ -48,9 +48,9 @@ console.log(`Разрешённые апдейты: ${info.allowed_updates?.join
 console.log(`Ожидают обработки: ${info.pending_update_count}`);
 
 // Ретеншен журнала: разово на старте и далее раз в сутки.
-pruneJoinEvents(JOIN_EVENTS_RETENTION_MS);
-setInterval(() => {
-  const removed = pruneJoinEvents(JOIN_EVENTS_RETENTION_MS);
+await pruneJoinEvents(JOIN_EVENTS_RETENTION_MS);
+setInterval(async () => {
+  const removed = await pruneJoinEvents(JOIN_EVENTS_RETENTION_MS);
   if (removed > 0) console.log(`Очищено старых записей журнала: ${removed}`);
 }, DAY_MS);
 

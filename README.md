@@ -1,75 +1,64 @@
-# housekeeper
+# gatekeepeer
 
 Telegram-бот, который автоматически принимает заявки на вступление в приватные
-каналы и чаты. Бот мультиарендный: добавьте его админом в свой канал — и владельцем
-настроек становится создатель канала (а не тот, кто добавил бота). Личный чат с
-ботом — пульт управления, где каждый видит только свои каналы.
+каналы и чаты. Мультиарендный: добавьте его админом в свой канал — владельцем
+настроек станет создатель канала. Личный чат с ботом — пульт управления, где
+каждый видит только свои каналы.
 
-Стек: **Bun + TypeScript + [grammY](https://grammy.dev) + bun:sqlite**, апдейты
-доставляются через **webhook**.
+Стек: **Bun · TypeScript · [grammY](https://grammy.dev) · libSQL
+([Turso](https://turso.tech))**, апдейты через webhook.
 
 ## Что делает
 
-- На `chat_join_request` молча одобряет заявку, если канал подключён и авто-приём включён.
-- Сам обнаруживает канал, когда его добавили админом с правом приглашать (`my_chat_member`);
-  владельцем настроек записывает создателя канала.
-- В личке: `/channels`, `/status`, `/stats`, `/help`. Переключение авто-приёма — кнопками.
+- Молча одобряет `chat_join_request`, если канал подключён и авто-приём включён.
+- Сам регистрирует канал, когда его добавили админом с правом приглашать.
+- В личке: `/channels`, `/status`, `/stats`, `/help`; авто-приём — кнопками.
 
-## Настройка
-
-1. Создайте бота у [@BotFather](https://t.me/BotFather), получите токен.
-2. Скопируйте конфиг и заполните:
-   ```sh
-   cp .env.example .env
-   ```
-   - `BOT_TOKEN` — токен от BotFather
-   - `WEBHOOK_URL` — публичный https-адрес (см. ниже про туннель)
-   - `WEBHOOK_SECRET` — любая случайная строка
-3. Установите зависимости:
-   ```sh
-   bun install
-   ```
-
-### Локальный запуск через туннель
-
-Вебхуку нужен публичный HTTPS. Поднимите туннель на локальный порт (по умолчанию 3000):
+## Запуск
 
 ```sh
-cloudflared tunnel --url http://localhost:3000
-# или: ngrok http 3000
+bun install
+cp .env.example .env   # заполнить BOT_TOKEN, WEBHOOK_URL, WEBHOOK_SECRET
 ```
 
-Полученный https-адрес положите в `WEBHOOK_URL`, затем:
+Вебхуку нужен публичный HTTPS — локально через туннель:
 
 ```sh
-bun run dev    # с автоперезапуском
-# или
-bun start
+cloudflared tunnel --url http://localhost:3000   # адрес → WEBHOOK_URL
+bun run dev
 ```
 
-При старте бот сам вызывает `setWebhook` с нужными `allowed_updates`
-(включая `chat_join_request` и `my_chat_member` — без них заявки не приходят) и
-печатает в лог состояние вебхука.
+В разработке БД — локальный SQLite-файл; для прода задайте `TURSO_DATABASE_URL` и
+`TURSO_AUTH_TOKEN`. При старте бот сам вызывает `setWebhook` с нужными
+`allowed_updates`.
 
 ## Подключение канала
 
-1. В канале/группе включите приём по заявкам (invite-ссылка с «Approve new members»).
-2. Добавьте бота администратором с правом **«Добавлять участников»**.
-3. Бот обнаружит канал и начнёт принимать заявки. Управление — командой `/channels`
-   в личке с ботом.
+1. Включите в канале приём по заявкам (invite-ссылка с «Approve new members»).
+2. Добавьте бота админом с правом **«Добавлять участников»**.
+3. Управляйте через `/channels` в личке с ботом.
 
-## Структура
+## Деплой (Fly.io + Turso)
 
+```sh
+turso db create gatekeepeer
+turso db show --url gatekeepeer        # → TURSO_DATABASE_URL
+turso db tokens create gatekeepeer     # → TURSO_AUTH_TOKEN
+
+fly launch --no-deploy --copy-config --name <app> --region fra
+fly secrets set BOT_TOKEN=… WEBHOOK_SECRET=… \
+  WEBHOOK_URL="https://<app>.fly.dev" \
+  TURSO_DATABASE_URL="libsql://…" TURSO_AUTH_TOKEN="…"
+fly deploy
 ```
-src/
-  config.ts            конфиг из .env
-  db.ts                bun:sqlite: схема и запросы (скоуп по владельцу)
-  bot.ts               сборка Bot и регистрация хендлеров
-  keyboards.ts         inline-клавиатуры
-  handlers/
-    joinRequest.ts     приём заявок (chat_join_request)
-    chatMember.ts      авто-регистрация канала (my_chat_member)
-    commands.ts        /start /help /channels /status /stats
-    callbacks.ts       переключение авто-приёма
-  index.ts             Bun.serve + webhook + setWebhook
+
+Проверка: `fly logs` и `GET https://<app>.fly.dev/health` → `ok`.
+
+## Команды
+
+```sh
+bun run dev      # запуск с автоперезапуском
+bun start        # обычный запуск
+bun test         # тесты
+bunx tsc --noEmit  # проверка типов
 ```

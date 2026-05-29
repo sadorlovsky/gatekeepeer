@@ -7,7 +7,7 @@ Telegram-бот авто-приёма заявок на вступление в 
 
 ## Стек и запуск
 
-- **Bun + TypeScript + [grammY](https://grammy.dev) + bun:sqlite**, апдейты через **webhook** (не long-polling).
+- **Bun + TypeScript + [grammY](https://grammy.dev) + libSQL ([@libsql/client](https://docs.turso.tech))**, апдейты через **webhook** (не long-polling). БД — Turso в проде, локальный файл SQLite (`file:…`) в разработке; клиент один и тот же, выбор делает `config.db`.
 - `bun run dev` — запуск с автоперезапуском (`bun --watch`).
 - `bun start` — обычный запуск.
 - `bunx tsc --noEmit` — проверка типов (есть `noEmit`, эмита нет — только typecheck).
@@ -26,7 +26,12 @@ Telegram-бот авто-приёма заявок на вступление в 
 - `WEBHOOK_URL` — публичный https-адрес (обязателен).
 - `WEBHOOK_SECRET` — секрет для проверки апдейтов (обязателен).
 - `PORT` — порт HTTP-сервера, по умолчанию `3000`.
-- `DB_PATH` — путь к SQLite, по умолчанию `housekeeper.sqlite`.
+- `TURSO_DATABASE_URL` — адрес Turso-БД (`libsql://…`). Если задан — работаем с
+  Turso; иначе откатываемся на локальный файл из `DB_PATH`.
+- `TURSO_AUTH_TOKEN` — токен Turso. Обязателен, когда `TURSO_DATABASE_URL` —
+  сетевой адрес (`libsql`/`https`/`wss`); для `file:` не нужен.
+- `DB_PATH` — путь к локальному SQLite-файлу для разработки, по умолчанию
+  `housekeeper.sqlite`. Используется только когда `TURSO_DATABASE_URL` пуст.
 
 Валидация в `src/config.ts`: отсутствие обязательной переменной кидает ошибку на старте.
 
@@ -68,8 +73,16 @@ src/
   пишется создатель канала (см. скоуп выше). Понижение/удаление/потеря права
   приглашать → `deactivateChannel` (`active = 0`, не удаление). Работаем только с
   `channel` и `supergroup`.
-- **SQLite в WAL-режиме**, `foreign_keys = ON`. Схема — `CREATE TABLE IF NOT EXISTS`
-  прямо в `db.ts` при импорте; миграций как отдельного механизма нет.
+- **libSQL-клиент один на оба режима.** `config.db` отдаёт `{ url, authToken,
+  isRemote }`: при заданном `TURSO_DATABASE_URL` — удалённая Turso, иначе
+  `file:${DB_PATH}`. PRAGMA `journal_mode = WAL` и `foreign_keys = ON` ставятся
+  только для локального файла (`!isRemote`) — на Turso это управляется
+  платформой. Схема + миграции прогоняются на **top-level await** в `db.ts` при
+  импорте; миграций как отдельного механизма нет.
+- **Все функции `db.ts` асинхронные** (libSQL — async): хендлеры, `index.ts` и
+  тесты обязаны их `await`-ить. Доступ к БД — `client.execute({ sql, args })` с
+  именованными параметрами (`$name` в SQL, ключ `name` без префикса в `args`),
+  запись+инкремент счётчика в `logJoin` — через `client.transaction("write")`.
 
 ## База
 

@@ -20,7 +20,7 @@ export function registerCallbacks(bot: Bot): void {
     }
 
     const chatId = Number(match[1]);
-    const channel = getChannel(chatId);
+    const channel = await getChannel(chatId);
 
     // Канал не принадлежит этому пользователю (или исчез) — отказ.
     if (!channel || channel.added_by !== userId) {
@@ -29,14 +29,14 @@ export function registerCallbacks(bot: Bot): void {
     }
 
     const next = channel.auto_approve === 0;
-    setAutoApprove(chatId, userId, next);
+    await setAutoApprove(chatId, userId, next);
 
     await ctx.answerCallbackQuery({
       text: next ? "Авто-приём включён ✅" : "Авто-приём выключен ⛔️",
     });
 
     // Перерисовываем клавиатуру с актуальными отметками.
-    const channels = listChannelsByOwner(userId);
+    const channels = await listChannelsByOwner(userId);
     await ctx.editMessageReplyMarkup({ reply_markup: channelsKeyboard(channels) });
   });
 }

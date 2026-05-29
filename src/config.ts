@@ -21,12 +21,34 @@ function requiredSecret(name: string): string {
   return value;
 }
 
+// Подключение к БД через libSQL: либо удалённая Turso (libsql://… + токен),
+// либо локальный файл (file:…) для разработки. Если TURSO_DATABASE_URL задан —
+// идём в Turso; иначе откатываемся на локальный SQLite-файл из DB_PATH.
+// Так dev-режим работает без всякой облачной конфигурации.
+function buildDbConfig(): { url: string; authToken?: string; isRemote: boolean } {
+  const remoteUrl = process.env.TURSO_DATABASE_URL?.trim();
+  if (remoteUrl) {
+    const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
+    // Сетевые схемы требуют токена аутентификации; file: — нет.
+    const isRemote = /^(libsql|https?|wss?):\/\//.test(remoteUrl);
+    if (isRemote && !authToken) {
+      throw new Error(
+        "Для удалённой БД (TURSO_DATABASE_URL) нужен TURSO_AUTH_TOKEN (см. .env.example)",
+      );
+    }
+    return { url: remoteUrl, authToken, isRemote };
+  }
+  // Локальная разработка: файл SQLite через схему file:.
+  const dbPath = process.env.DB_PATH ?? "housekeeper.sqlite";
+  return { url: `file:${dbPath}`, isRemote: false };
+}
+
 export const config = {
   botToken: required("BOT_TOKEN"),
   webhookUrl: required("WEBHOOK_URL").replace(/\/+$/, ""),
   webhookSecret: requiredSecret("WEBHOOK_SECRET"),
   port: Number(process.env.PORT ?? 3000),
-  dbPath: process.env.DB_PATH ?? "housekeeper.sqlite",
+  db: buildDbConfig(),
   // Путь, по которому сервер принимает апдейты от Telegram.
   webhookPath: "/webhook",
 } as const;
