@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.png" alt="gatekeepeer" width="100%">
+  <img src="assets/banner.webp" alt="gatekeepeer" width="100%">
 </p>
 
 <p align="center">
