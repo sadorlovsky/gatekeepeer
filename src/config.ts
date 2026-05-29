@@ -3,7 +3,9 @@
 function required(name: string): string {
   const value = process.env[name];
   if (!value) {
-    throw new Error(`Не задана обязательная переменная окружения ${name} (см. .env.example)`);
+    throw new Error(
+      `Не задана обязательная переменная окружения ${name} (см. .env.example)`,
+    );
   }
   return value;
 }
@@ -25,7 +27,11 @@ function requiredSecret(name: string): string {
 // либо локальный файл (file:…) для разработки. Если TURSO_DATABASE_URL задан —
 // идём в Turso; иначе откатываемся на локальный SQLite-файл из DB_PATH.
 // Так dev-режим работает без всякой облачной конфигурации.
-function buildDbConfig(): { url: string; authToken?: string; isRemote: boolean } {
+function buildDbConfig(): {
+  url: string;
+  authToken?: string;
+  isRemote: boolean;
+} {
   const remoteUrl = process.env.TURSO_DATABASE_URL?.trim();
   if (remoteUrl) {
     const authToken = process.env.TURSO_AUTH_TOKEN?.trim();
@@ -39,7 +45,7 @@ function buildDbConfig(): { url: string; authToken?: string; isRemote: boolean }
     return { url: remoteUrl, authToken, isRemote };
   }
   // Локальная разработка: файл SQLite через схему file:.
-  const dbPath = process.env.DB_PATH ?? "housekeeper.sqlite";
+  const dbPath = process.env.DB_PATH ?? "gatekeepeer.sqlite";
   return { url: `file:${dbPath}`, isRemote: false };
 }
 

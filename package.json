@@ -1,5 +1,5 @@
 {
-  "name": "housekeeper",
+  "name": "gatekeepeer",
   "version": "0.1.0",
   "description": "Telegram-бот авто-приёма заявок на вступление в приватные каналы/чаты",
   "type": "module",

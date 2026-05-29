@@ -31,7 +31,7 @@ Telegram-бот авто-приёма заявок на вступление в 
 - `TURSO_AUTH_TOKEN` — токен Turso. Обязателен, когда `TURSO_DATABASE_URL` —
   сетевой адрес (`libsql`/`https`/`wss`); для `file:` не нужен.
 - `DB_PATH` — путь к локальному SQLite-файлу для разработки, по умолчанию
-  `housekeeper.sqlite`. Используется только когда `TURSO_DATABASE_URL` пуст.
+  `gatekeepeer.sqlite`. Используется только когда `TURSO_DATABASE_URL` пуст.
 
 Валидация в `src/config.ts`: отсутствие обязательной переменной кидает ошибку на старте.
 

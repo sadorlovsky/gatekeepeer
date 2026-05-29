@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 
-const dbPath = `/private/tmp/housekeeper-test-${process.pid}-${Date.now()}.sqlite`;
+const dbPath = `/private/tmp/gatekeepeer-test-${process.pid}-${Date.now()}.sqlite`;
 
 type DbModule = typeof import("../src/db.ts");
 let db: DbModule;
@@ -130,7 +130,11 @@ function commandHarness(): { bot: any; handlers: Record<string, Handler> } {
   };
 }
 
-function callbackHarness(): { bot: any; handler: Handler | null; pattern: RegExp | null } {
+function callbackHarness(): {
+  bot: any;
+  handler: Handler | null;
+  pattern: RegExp | null;
+} {
   let handler: Handler | null = null;
   let pattern: RegExp | null = null;
   return {
@@ -225,13 +229,17 @@ describe("join event accounting", () => {
   });
 
   test("retention pruning does not change all-time approved stats", async () => {
-    const before = (await db.statsByOwner(1)).find((stat) => stat.chat_id === -100);
+    const before = (await db.statsByOwner(1)).find(
+      (stat) => stat.chat_id === -100,
+    );
     expect(before?.approved).toBe(2);
 
     const removed = await db.pruneJoinEvents(0);
     expect(removed).toBeGreaterThan(0);
 
-    const after = (await db.statsByOwner(1)).find((stat) => stat.chat_id === -100);
+    const after = (await db.statsByOwner(1)).find(
+      (stat) => stat.chat_id === -100,
+    );
     expect(after?.approved).toBe(2);
   });
 });
@@ -275,8 +283,18 @@ describe("commands", () => {
   });
 
   test("channels, status, and stats are scoped to the requesting owner", async () => {
-    await db.upsertChannel({ chatId: -500, title: "Owner scoped", type: "channel", addedBy: 50 });
-    await db.upsertChannel({ chatId: -501, title: "Other owner", type: "channel", addedBy: 51 });
+    await db.upsertChannel({
+      chatId: -500,
+      title: "Owner scoped",
+      type: "channel",
+      addedBy: 50,
+    });
+    await db.upsertChannel({
+      chatId: -501,
+      title: "Other owner",
+      type: "channel",
+      addedBy: 51,
+    });
     await db.logJoin({
       chatId: -500,
       userId: 5000,
@@ -360,7 +378,12 @@ describe("callbacks", () => {
   });
 
   test("toggle callback rejects channels owned by someone else", async () => {
-    await db.upsertChannel({ chatId: -600, title: "Private toggle", type: "channel", addedBy: 60 });
+    await db.upsertChannel({
+      chatId: -600,
+      title: "Private toggle",
+      type: "channel",
+      addedBy: 60,
+    });
     const harness = callbackHarness();
     callbacksModule.registerCallbacks(harness.bot);
     const answers: unknown[][] = [];
@@ -379,7 +402,12 @@ describe("callbacks", () => {
   });
 
   test("toggle callback flips auto approve and refreshes markup for the owner", async () => {
-    await db.upsertChannel({ chatId: -601, title: "Toggle me", type: "channel", addedBy: 60 });
+    await db.upsertChannel({
+      chatId: -601,
+      title: "Toggle me",
+      type: "channel",
+      addedBy: 60,
+    });
     const harness = callbackHarness();
     callbacksModule.registerCallbacks(harness.bot);
     const answers: unknown[][] = [];
@@ -405,9 +433,19 @@ describe("callbacks", () => {
 
 describe("join request handler", () => {
   test("ignores unmanaged, inactive, and disabled channels", async () => {
-    await db.upsertChannel({ chatId: -700, title: "Disabled", type: "channel", addedBy: 70 });
+    await db.upsertChannel({
+      chatId: -700,
+      title: "Disabled",
+      type: "channel",
+      addedBy: 70,
+    });
     await db.setAutoApprove(-700, 70, false);
-    await db.upsertChannel({ chatId: -701, title: "Inactive", type: "channel", addedBy: 70 });
+    await db.upsertChannel({
+      chatId: -701,
+      title: "Inactive",
+      type: "channel",
+      addedBy: 70,
+    });
     await db.deactivateChannel(-701);
 
     const { bot, handlers } = eventHarness();
@@ -432,7 +470,12 @@ describe("join request handler", () => {
   });
 
   test("approves and records active auto-approve channel requests", async () => {
-    await db.upsertChannel({ chatId: -702, title: "Approvals", type: "channel", addedBy: 70 });
+    await db.upsertChannel({
+      chatId: -702,
+      title: "Approvals",
+      type: "channel",
+      addedBy: 70,
+    });
     const { bot, handlers } = eventHarness();
     joinRequestModule.registerJoinRequest(bot);
     const approvedUsers: number[] = [];
@@ -485,7 +528,12 @@ describe("chat member handler", () => {
   });
 
   test("reactivates an existing channel without transferring owner or sending duplicate DM", async () => {
-    await db.upsertChannel({ chatId: -801, title: "Existing", type: "channel", addedBy: 810 });
+    await db.upsertChannel({
+      chatId: -801,
+      title: "Existing",
+      type: "channel",
+      addedBy: 810,
+    });
     await db.deactivateChannel(-801);
     const { bot, handlers } = eventHarness();
     chatMemberModule.registerChatMember(bot);
@@ -517,7 +565,12 @@ describe("chat member handler", () => {
   });
 
   test("skips unsupported chat types and deactivates on permission loss", async () => {
-    await db.upsertChannel({ chatId: -802, title: "Permission loss", type: "channel", addedBy: 820 });
+    await db.upsertChannel({
+      chatId: -802,
+      title: "Permission loss",
+      type: "channel",
+      addedBy: 820,
+    });
     const { bot, handlers } = eventHarness();
     chatMemberModule.registerChatMember(bot);
 
