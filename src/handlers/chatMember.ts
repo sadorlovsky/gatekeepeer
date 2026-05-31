@@ -3,7 +3,7 @@
 // канала) и пишем ему в личку. Понизили / убрали → помечаем канал неактивным.
 
 import type { Bot, Context } from "grammy";
-import { deactivateChannel, getChannel, upsertChannel } from "../db.ts";
+import { deactivateChannel, getChannel, markWelcomePending, upsertChannel } from "../db.ts";
 
 export function registerChatMember(bot: Bot): void {
   bot.on("my_chat_member", async (ctx: Context) => {
@@ -62,8 +62,9 @@ export function registerChatMember(bot: Bot): void {
               `Авто-приём заявок включён. Управление — /channels.`,
           );
         } catch {
-          // Владелец ещё не запускал бота в личке — DM невозможен.
-          // Он увидит канал в /channels после /start. Это нормально.
+          // Владелец ещё не запускал бота в личке — DM невозможен. Откладываем
+          // приветствие: доставим его на /start (см. handlers/commands.ts).
+          await markWelcomePending(chat.id, true);
         }
       }
       return;
