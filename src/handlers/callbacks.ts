@@ -55,9 +55,17 @@ async function loadOwnedChannel(ctx: Context): Promise<Channel | null> {
 
 /** Перерисовывает сообщение в экран канала с актуальными данными. */
 async function renderDetail(ctx: Context, channel: Channel): Promise<void> {
-  await ctx.editMessageText(channelDetailText(channel), {
-    reply_markup: channelDetailKeyboard(channel),
-  });
+  try {
+    await ctx.editMessageText(channelDetailText(channel), {
+      reply_markup: channelDetailKeyboard(channel),
+    });
+  } catch (err) {
+    // Повторный выбор уже активного режима даёт идентичный текст+разметку, и
+    // Telegram отвечает «message is not modified» (400). Для пользователя это
+    // no-op (тост уже показан) — глушим, прочие ошибки пробрасываем.
+    const description = (err as { description?: string })?.description ?? "";
+    if (!description.includes("message is not modified")) throw err;
+  }
 }
 
 export function registerCallbacks(bot: Bot): void {

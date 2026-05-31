@@ -417,15 +417,17 @@ export async function deleteCaptchaPending(chatId: number, userId: number): Prom
  * обработать заявки в Telegram (по умолчанию они просто остаются висеть).
  */
 export async function prunePendingCaptcha(olderThanMs: number): Promise<CaptchaPending[]> {
+  // Граница включительна (<=): запись, созданную ровно на отсечке, тоже считаем
+  // истёкшей. Иначе prunePendingCaptcha(0) в тот же миллисекунд-тик не удалит её.
   const cutoff = Date.now() - olderThanMs;
   const res = await client.execute({
-    sql: `SELECT * FROM captcha_pending WHERE created_at < $cutoff`,
+    sql: `SELECT * FROM captcha_pending WHERE created_at <= $cutoff`,
     args: { cutoff },
   });
   const rows = res.rows as unknown as CaptchaPending[];
   if (rows.length > 0) {
     await client.execute({
-      sql: `DELETE FROM captcha_pending WHERE created_at < $cutoff`,
+      sql: `DELETE FROM captcha_pending WHERE created_at <= $cutoff`,
       args: { cutoff },
     });
   }
