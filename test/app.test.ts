@@ -193,6 +193,10 @@ describe("database migrations", () => {
     expect(channel?.join_mode).toBe("approve");
     expect(channel?.welcome_pending).toBe(0);
     expect(channel?.moderation_enabled).toBe(0);
+    // Legacy-каналы были зарегистрированы при наличии права приглашать; права по
+    // умолчанию 1 (can_delete — оптимистично, перепроверится на следующем событии).
+    expect(channel?.can_invite).toBe(1);
+    expect(channel?.can_delete).toBe(1);
   });
 });
 
@@ -640,6 +644,36 @@ describe("join request handler", () => {
 });
 
 describe("join request modes", () => {
+  test("ignores requests when the bot lacks invite permission", async () => {
+    // Канал подключён только под модерацию — приём заявок невозможен.
+    await db.upsertChannel({
+      chatId: -710,
+      title: "Antispam only",
+      type: "supergroup",
+      addedBy: 71,
+      canInvite: false,
+      canDelete: true,
+    });
+
+    const { bot, handlers } = eventHarness();
+    joinRequestModule.registerJoinRequest(bot);
+    let approvals = 0;
+    let declines = 0;
+
+    await handlers.chat_join_request?.({
+      chatJoinRequest: { chat: { id: -710 }, from: { id: 7100, username: "x" }, date: 7100 },
+      approveChatJoinRequest: async () => {
+        approvals += 1;
+      },
+      declineChatJoinRequest: async () => {
+        declines += 1;
+      },
+    });
+
+    expect(approvals).toBe(0);
+    expect(declines).toBe(0);
+  });
+
   test("decline mode declines the request and logs it as declined", async () => {
     await db.upsertChannel({ chatId: -730, title: "Decline chan", type: "channel", addedBy: 73 });
     await db.setJoinMode(-730, 73, "decline");
@@ -817,6 +851,37 @@ describe("spam moderation", () => {
     expect(classified).toBe(0);
     expect(deleted).toBe(0);
   });
+
+  test("does not classify when the bot lacks delete permission", async () => {
+    // Канал с включённой модерацией, но бот не может удалять сообщения.
+    await db.upsertChannel({
+      chatId: -752,
+      title: "No delete right",
+      type: "supergroup",
+      addedBy: 75,
+      canInvite: false,
+      canDelete: false,
+    });
+    await db.setModerationEnabled(-752, 75, true);
+
+    const run = eventHarness();
+    let classified = 0;
+    moderationModule.registerModeration(run.bot, async () => {
+      classified += 1;
+      return { spam: true, reason: "не должно вызваться" };
+    });
+    let deleted = 0;
+    await run.handlers.message?.({
+      message: { text: "spam https://x.example", message_id: 4 },
+      chat: { id: -752 },
+      deleteMessage: async () => {
+        deleted += 1;
+      },
+    });
+
+    expect(classified).toBe(0);
+    expect(deleted).toBe(0);
+  });
 });
 
 describe("chat member handler", () => {
@@ -844,6 +909,38 @@ describe("chat member handler", () => {
     expect((await db.getChannel(-800))?.added_by).toBe(800);
     expect(sentMessages[0]?.[0]).toBe(800);
     expect(String(sentMessages[0]?.[1])).toContain("Creator owned");
+  });
+
+  test("registers a moderation-only channel when the bot can delete but not invite", async () => {
+    const { bot, handlers } = eventHarness();
+    chatMemberModule.registerChatMember(bot);
+    const sentMessages: unknown[][] = [];
+
+    await handlers.my_chat_member?.({
+      myChatMember: {
+        chat: { id: -815, type: "supergroup", title: "Antispam only" },
+        new_chat_member: {
+          status: "administrator",
+          can_invite_users: false,
+          can_delete_messages: true,
+        },
+      },
+      api: {
+        getChatAdministrators: async () => [{ status: "creator", user: { id: 8150 } }],
+        sendMessage: async (...args: unknown[]) => {
+          sentMessages.push(args);
+        },
+      },
+    });
+
+    const channel = await db.getChannel(-815);
+    expect(channel?.active).toBe(1);
+    expect(channel?.added_by).toBe(8150);
+    expect(channel?.can_invite).toBe(0);
+    expect(channel?.can_delete).toBe(1);
+    // Онбординг-DM не обещает приём заявок, только модерацию.
+    expect(String(sentMessages[0]?.[1])).toContain("модерация");
+    expect(String(sentMessages[0]?.[1])).not.toContain("приём заявок");
   });
 
   test("marks welcome pending when the first-registration DM fails", async () => {

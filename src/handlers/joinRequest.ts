@@ -21,8 +21,14 @@ export function registerJoinRequest(bot: Bot): void {
     if (!req) return;
 
     const channel = await getChannel(req.chat.id);
-    if (!channel || channel.active === 0 || channel.auto_approve === 0) {
-      // Канал не под управлением или приём выключен — оставляем заявку висеть.
+    if (
+      !channel ||
+      channel.active === 0 ||
+      channel.can_invite === 0 ||
+      channel.auto_approve === 0
+    ) {
+      // Канал не под управлением, у бота нет права приглашать, или приём выключен —
+      // оставляем заявку висеть.
       return;
     }
 

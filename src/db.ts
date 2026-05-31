@@ -21,6 +21,8 @@ export interface Channel {
   join_mode: string; // JoinMode — что делать с заявкой, когда приём включён
   welcome_pending: number; // 0 | 1 — приветствие владельцу не доставлено (нет /start)
   moderation_enabled: number; // 0 | 1 — LLM-модерация спама в чате
+  can_invite: number; // 0 | 1 — у бота есть право приглашать (приём заявок возможен)
+  can_delete: number; // 0 | 1 — у бота есть право удалять сообщения (модерация возможна)
   created_at: number;
 }
 
@@ -59,6 +61,8 @@ await client.execute(`
     join_mode          TEXT NOT NULL DEFAULT 'approve',
     welcome_pending    INTEGER NOT NULL DEFAULT 0,
     moderation_enabled INTEGER NOT NULL DEFAULT 0,
+    can_invite         INTEGER NOT NULL DEFAULT 1,
+    can_delete         INTEGER NOT NULL DEFAULT 1,
     created_at         INTEGER NOT NULL
   )
 `);
@@ -144,6 +148,16 @@ if (!channelCols.has("welcome_pending")) {
 if (!channelCols.has("moderation_enabled")) {
   await client.execute(`ALTER TABLE channels ADD COLUMN moderation_enabled INTEGER NOT NULL DEFAULT 0`);
 }
+// Права бота в чате. Дефолт 1 для обоих: legacy-каналы были зарегистрированы
+// при наличии права приглашать (can_invite=1 точно верно), а can_delete ставим
+// оптимистично, чтобы не оборвать уже включённую модерацию — реальные права всё
+// равно перепроверятся при следующем my_chat_member и deleteMessage fail-safe.
+if (!channelCols.has("can_invite")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN can_invite INTEGER NOT NULL DEFAULT 1`);
+}
+if (!channelCols.has("can_delete")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN can_delete INTEGER NOT NULL DEFAULT 1`);
+}
 
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_channels_added_by ON channels(added_by)`);
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_captcha_created ON captcha_pending(created_at)`);
@@ -158,25 +172,31 @@ await client.execute(
 // --- Каналы ---
 
 const UPSERT_CHANNEL_SQL = `
-  INSERT INTO channels (chat_id, title, type, added_by, auto_approve, active, created_at)
-  VALUES ($chat_id, $title, $type, $added_by, 1, 1, $created_at)
+  INSERT INTO channels (chat_id, title, type, added_by, auto_approve, active, can_invite, can_delete, created_at)
+  VALUES ($chat_id, $title, $type, $added_by, 1, 1, $can_invite, $can_delete, $created_at)
   ON CONFLICT(chat_id) DO UPDATE SET
-    title  = excluded.title,
-    type   = excluded.type,
-    active = 1
+    title      = excluded.title,
+    type       = excluded.type,
+    active     = 1,
+    can_invite = excluded.can_invite,
+    can_delete = excluded.can_delete
 `;
 
 /**
  * Регистрирует канал (или реактивирует уже известный) при добавлении бота админом.
  * Владелец (added_by) — создатель канала (creator), определяется при первой
  * регистрации (см. handlers/chatMember.ts) и НЕ перезаписывается: иначе со-админ,
- * тронувший права бота, перехватил бы контроль над каналом.
+ * тронувший права бота, перехватил бы контроль над каналом. Права бота
+ * (canInvite/canDelete) обновляются и при реактивации — они отражают текущий
+ * набор прав. По умолчанию true (полнофункциональный бот) для вызовов без флагов.
  */
 export async function upsertChannel(params: {
   chatId: number;
   title: string | null;
   type: string | null;
   addedBy: number;
+  canInvite?: boolean;
+  canDelete?: boolean;
 }): Promise<void> {
   await client.execute({
     sql: UPSERT_CHANNEL_SQL,
@@ -185,6 +205,8 @@ export async function upsertChannel(params: {
       title: params.title,
       type: params.type,
       added_by: params.addedBy,
+      can_invite: params.canInvite === false ? 0 : 1,
+      can_delete: params.canDelete === false ? 0 : 1,
       created_at: Date.now(),
     },
   });

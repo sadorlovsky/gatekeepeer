@@ -1,6 +1,8 @@
 // Авто-регистрация канала: реагируем на изменение статуса самого бота.
-// Стал админом с правом приглашать → регистрируем канал на владельца (создателя
-// канала) и пишем ему в личку. Понизили / убрали → помечаем канал неактивным.
+// Стал админом с правом приглашать ИЛИ удалять сообщения → регистрируем канал
+// на владельца (создателя канала) и пишем ему в личку. Право приглашать включает
+// приём заявок, право удалять — модерацию спама; их можно использовать порознь.
+// Потеря обоих прав / понижение / удаление → помечаем канал неактивным.
 
 import type { Bot, Context } from "grammy";
 import { deactivateChannel, getChannel, markWelcomePending, upsertChannel } from "../db.ts";
@@ -15,10 +17,13 @@ export function registerChatMember(bot: Bot): void {
     // Управляем только каналами и супергруппами (там есть заявки на вступление).
     if (chat.type !== "channel" && chat.type !== "supergroup") return;
 
-    const isAdminWithInvite =
-      member.status === "administrator" && member.can_invite_users === true;
+    const isAdmin = member.status === "administrator";
+    const canInvite = isAdmin && member.can_invite_users === true;
+    const canDelete = isAdmin && member.can_delete_messages === true;
 
-    if (isAdminWithInvite) {
+    // Бот полезен, если может хоть что-то: приглашать (приём заявок) или удалять
+    // (модерация). Без обоих прав управлять каналом нечем — деактивируем.
+    if (canInvite || canDelete) {
       const existing = await getChannel(chat.id);
 
       // Владелец — создатель канала (creator), а не тот, кто добавил бота:
@@ -49,17 +54,23 @@ export function registerChatMember(bot: Bot): void {
         title: chat.title,
         type: chat.type,
         addedBy: ownerId,
+        canInvite,
+        canDelete,
       });
 
       // Уведомляем владельца только при первой регистрации, чтобы не слать
-      // «подключён» повторно при каждом изменении прав бота.
+      // «подключён» повторно при каждом изменении прав бота. Текст зависит от
+      // того, что боту доступно по правам.
       if (!existing) {
         const title = chat.title;
+        const caps: string[] = [];
+        if (canInvite) caps.push("• авто-приём заявок на вступление");
+        if (canDelete) caps.push("• модерация спама (включите в /channels)");
         try {
           await ctx.api.sendMessage(
             ownerId,
-            `✅ Канал «${title}» подключён.\n` +
-              `Авто-приём заявок включён. Управление — /channels.`,
+            `✅ Канал «${title}» подключён.\nДоступно:\n${caps.join("\n")}\n\n` +
+              `Управление — /channels.`,
           );
         } catch {
           // Владелец ещё не запускал бота в личке — DM невозможен. Откладываем
@@ -70,12 +81,8 @@ export function registerChatMember(bot: Bot): void {
       return;
     }
 
-    // Бот больше не админ с нужными правами (понизили / kicked / left).
-    if (member.status === "left" || member.status === "kicked" || member.status === "member") {
-      await deactivateChannel(chat.id);
-    } else if (member.status === "administrator" && member.can_invite_users !== true) {
-      // Остался админом, но без права приглашать — одобрять заявки не сможем.
-      await deactivateChannel(chat.id);
-    }
+    // Бот не админ или админ без полезных прав (понизили / kicked / left /
+    // сняли и право приглашать, и право удалять) — управлять нечем.
+    await deactivateChannel(chat.id);
   });
 }

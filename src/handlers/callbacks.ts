@@ -97,6 +97,12 @@ export function registerCallbacks(bot: Bot): void {
   bot.callbackQuery(new RegExp(`^${TOGGLE_PREFIX}:(-?\\d+)$`), async (ctx: Context) => {
     const channel = await loadOwnedChannel(ctx);
     if (!channel) return;
+    // Право могло пропасть после рендера клавиатуры — защищаемся от устаревшей кнопки.
+    if (channel.can_invite === 0) {
+      await ctx.answerCallbackQuery({ text: "У бота нет права приглашать." });
+      await renderDetail(ctx, channel);
+      return;
+    }
     const next = channel.auto_approve === 0;
     await setAutoApprove(channel.chat_id, channel.added_by, next);
     await ctx.answerCallbackQuery({
@@ -112,6 +118,11 @@ export function registerCallbacks(bot: Bot): void {
     async (ctx: Context) => {
       const channel = await loadOwnedChannel(ctx);
       if (!channel) return;
+      if (channel.can_invite === 0) {
+        await ctx.answerCallbackQuery({ text: "У бота нет права приглашать." });
+        await renderDetail(ctx, channel);
+        return;
+      }
       const match = ctx.match;
       const mode = Array.isArray(match) ? (match[2] as JoinMode | undefined) : undefined;
       if (!mode) {
@@ -134,6 +145,11 @@ export function registerCallbacks(bot: Bot): void {
   bot.callbackQuery(new RegExp(`^${MOD_PREFIX}:(-?\\d+)$`), async (ctx: Context) => {
     const channel = await loadOwnedChannel(ctx);
     if (!channel) return;
+    if (channel.can_delete === 0) {
+      await ctx.answerCallbackQuery({ text: "У бота нет права удалять сообщения." });
+      await renderDetail(ctx, channel);
+      return;
+    }
     const next = channel.moderation_enabled === 0;
     await setModerationEnabled(channel.chat_id, channel.added_by, next);
     await ctx.answerCallbackQuery({

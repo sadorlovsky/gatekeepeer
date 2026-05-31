@@ -14,6 +14,8 @@ export const CAP_PREFIX = "cap"; // капча-кнопка в личке зая
 
 /** Глиф статуса канала для подписи в списке. */
 function statusGlyph(ch: Channel): string {
+  // Бот без права приглашать — канал подключён только под модерацию.
+  if (ch.can_invite === 0) return "🛡";
   if (ch.auto_approve === 0) return "⏸️";
   switch (ch.join_mode) {
     case "decline":
@@ -41,43 +43,60 @@ const MODE_LABEL: Record<string, string> = {
   captcha: "Проверка (капча)",
 };
 
-/** Текст экрана отдельного канала. */
+/** Текст экрана отдельного канала. Состав строк зависит от прав бота в чате. */
 export function channelDetailText(ch: Channel): string {
   const title = ch.title ?? String(ch.chat_id);
-  const lines = [
-    `Канал «${title}»`,
-    `Статус: ${ch.active ? "активен" : "отключён"}`,
-    `Авто-приём: ${ch.auto_approve ? "вкл ✅" : "выкл ⛔️"}`,
-    `Режим заявок: ${MODE_LABEL[ch.join_mode] ?? ch.join_mode}`,
-    `Принято заявок: ${ch.approved_count}`,
-    `Модерация спама: ${ch.moderation_enabled ? "вкл 🛡" : "выкл"}`,
-  ];
+  const lines = [`Канал «${title}»`, `Статус: ${ch.active ? "активен" : "отключён"}`];
+
+  // Приём заявок доступен только при праве приглашать.
+  if (ch.can_invite) {
+    lines.push(
+      `Авто-приём: ${ch.auto_approve ? "вкл ✅" : "выкл ⛔️"}`,
+      `Режим заявок: ${MODE_LABEL[ch.join_mode] ?? ch.join_mode}`,
+      `Принято заявок: ${ch.approved_count}`,
+    );
+  } else {
+    lines.push("Приём заявок: недоступен (у бота нет права приглашать)");
+  }
+
+  // Модерация доступна только при праве удалять сообщения.
+  if (ch.can_delete) {
+    lines.push(`Модерация спама: ${ch.moderation_enabled ? "вкл 🛡" : "выкл"}`);
+  } else {
+    lines.push("Модерация спама: недоступна (у бота нет права удалять сообщения)");
+  }
+
   return lines.join("\n");
 }
 
-/** Клавиатура экрана канала: тогглы и выбор режима. */
+/** Клавиатура экрана канала: тогглы и выбор режима, по доступным правам. */
 export function channelDetailKeyboard(ch: Channel): InlineKeyboard {
   const id = ch.chat_id;
   const kb = new InlineKeyboard();
 
-  // Мастер-выключатель приёма.
-  kb.text(
-    ch.auto_approve ? "⛔️ Выключить приём" : "✅ Включить приём",
-    `${TOGGLE_PREFIX}:${id}`,
-  ).row();
+  // Блок приёма заявок — только если бот может приглашать.
+  if (ch.can_invite) {
+    // Мастер-выключатель приёма.
+    kb.text(
+      ch.auto_approve ? "⛔️ Выключить приём" : "✅ Включить приём",
+      `${TOGGLE_PREFIX}:${id}`,
+    ).row();
 
-  // Выбор режима (активный помечен точкой).
-  const dot = (mode: string) => (ch.join_mode === mode ? "• " : "");
-  kb.text(`${dot("approve")}✅ Приём`, `${MODE_PREFIX}:${id}:approve`)
-    .text(`${dot("decline")}🚫 Отклонять`, `${MODE_PREFIX}:${id}:decline`)
-    .text(`${dot("captcha")}🤖 Капча`, `${MODE_PREFIX}:${id}:captcha`)
-    .row();
+    // Выбор режима (активный помечен точкой).
+    const dot = (mode: string) => (ch.join_mode === mode ? "• " : "");
+    kb.text(`${dot("approve")}✅ Приём`, `${MODE_PREFIX}:${id}:approve`)
+      .text(`${dot("decline")}🚫 Отклонять`, `${MODE_PREFIX}:${id}:decline`)
+      .text(`${dot("captcha")}🤖 Капча`, `${MODE_PREFIX}:${id}:captcha`)
+      .row();
+  }
 
-  // Модерация спама.
-  kb.text(
-    ch.moderation_enabled ? "🛡 Модерация: выкл" : "🛡 Модерация: вкл",
-    `${MOD_PREFIX}:${id}`,
-  ).row();
+  // Модерация спама — только если бот может удалять сообщения.
+  if (ch.can_delete) {
+    kb.text(
+      ch.moderation_enabled ? "🛡 Модерация: выкл" : "🛡 Модерация: вкл",
+      `${MOD_PREFIX}:${id}`,
+    ).row();
+  }
 
   kb.text("« Назад", LIST_PREFIX);
   return kb;

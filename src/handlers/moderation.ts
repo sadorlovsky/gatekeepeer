@@ -26,7 +26,15 @@ export function registerModeration(
     if (chatId === undefined) return;
 
     const channel = await getChannel(chatId);
-    if (!channel || channel.active === 0 || channel.moderation_enabled === 0) return;
+    // can_delete === 0 → удалять спам нечем, нет смысла дёргать LLM.
+    if (
+      !channel ||
+      channel.active === 0 ||
+      channel.moderation_enabled === 0 ||
+      channel.can_delete === 0
+    ) {
+      return;
+    }
 
     const text = msg.text ?? msg.caption;
     if (!shouldClassify(text, channel)) return;

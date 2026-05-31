@@ -95,11 +95,19 @@ src/
   `registerModeration` (в тестах — стаб, без сети). **Privacy mode:** в группах бот
   читает сообщения только при выключенном privacy mode в BotFather ИЛИ будучи
   админом (наш бот — админ, покрыто); для каналов нужен `channel_post` и админ-статус.
-- **Авто-регистрация по `my_chat_member`.** Канал регистрируется (`upsertChannel`)
-  только когда бот стал `administrator` с `can_invite_users === true`; владельцем
-  пишется создатель канала (см. скоуп выше). Понижение/удаление/потеря права
-  приглашать → `deactivateChannel` (`active = 0`, не удаление). Работаем только с
-  `channel` и `supergroup`.
+- **Авто-регистрация по `my_chat_member`.** Канал регистрируется (`upsertChannel`),
+  когда бот стал `administrator` с правом приглашать (`can_invite_users`) **ИЛИ**
+  удалять (`can_delete_messages`) — права независимы и используются порознь. Эти два
+  права пишутся в `channels.can_invite` / `can_delete` и обновляются при каждом
+  событии (в т.ч. при реактивации). Владельцем пишется создатель канала (см. скоуп
+  выше). Потеря **обоих** прав / понижение / удаление → `deactivateChannel`
+  (`active = 0`, не удаление). Работаем только с `channel` и `supergroup`.
+- **Способности гейтятся по правам.** Приём заявок (`handlers/joinRequest.ts`)
+  требует `can_invite === 1`; LLM-модерация (`handlers/moderation.ts`) — `can_delete
+  === 1`. Так бот, добавленный админом без права приглашать, работает как чистый
+  антиспам. Экран канала и клавиатура (`keyboards.ts`) показывают только доступные по
+  правам блоки; колбэки в `callbacks.ts` дополнительно проверяют право (защита от
+  устаревшей кнопки).
 - **libSQL-клиент один на оба режима.** `config.db` отдаёт `{ url, authToken,
   isRemote }`: при заданном `TURSO_DATABASE_URL` — удалённая Turso, иначе
   `file:${DB_PATH}`. PRAGMA `journal_mode = WAL` и `foreign_keys = ON` ставятся
@@ -115,13 +123,17 @@ src/
 
 - `channels` — `chat_id` (PK), `title`, `type`, `added_by`, `auto_approve`, `active`,
   `approved_count`, `join_mode`, `welcome_pending`, `moderation_enabled`,
-  `created_at`. `added_by` (создатель канала) фиксируется при первой регистрации и
-  не перезаписывается (защита от перехвата владения). `approved_count` — all-time
-  счётчик одобренных заявок, его и читает `/stats`. `join_mode` (`approve`/`decline`/
-  `captcha`, дефолт `approve`) — действие при включённом приёме. `welcome_pending` —
-  флаг недоставленного приветствия (DM упал, владелец не нажал `/start`); доставка
-  на `/start` (`listPendingWelcome`/`markWelcomePending`). `moderation_enabled` —
-  per-channel LLM-модерация.
+  `can_invite`, `can_delete`, `created_at`. `added_by` (создатель канала) фиксируется
+  при первой регистрации и не перезаписывается (защита от перехвата владения).
+  `approved_count` — all-time счётчик одобренных заявок, его и читает `/stats`.
+  `join_mode` (`approve`/`decline`/`captcha`, дефолт `approve`) — действие при
+  включённом приёме. `welcome_pending` — флаг недоставленного приветствия (DM упал,
+  владелец не нажал `/start`); доставка на `/start` (`listPendingWelcome`/
+  `markWelcomePending`). `moderation_enabled` — per-channel LLM-модерация.
+  `can_invite` / `can_delete` — текущие права бота в чате, обновляются на каждом
+  `my_chat_member`; гейтят приём заявок и модерацию соответственно. Дефолт миграции
+  на legacy-БД — `1` для обоих (каналы регистрировались при праве приглашать;
+  `can_delete` оптимистичен, перепроверяется при следующем событии).
 - `join_events` — журнал решений (`approved`/`declined`). Уникальный индекс
   `(chat_id, user_id, requested_at)` + `INSERT OR IGNORE` делают запись
   идемпотентной (переобработка вебхука не задвоит). Журнал чистится по
