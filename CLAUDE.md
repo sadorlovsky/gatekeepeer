@@ -37,8 +37,17 @@ Telegram-бот авто-приёма заявок на вступление в 
   (`config.moderationEnabled = false`). `LLM_BASE_URL` по умолчанию
   `https://api.openai.com/v1`, `LLM_MODEL` — `gpt-4o-mini`. Сменив `LLM_BASE_URL`,
   можно ходить в OpenRouter или локальную модель тем же кодом.
+- `CAS_ENABLED` / `CAS_API_URL` / `CAS_TIMEOUT_MS` — внешний blocklist Combot
+  Anti-Spam (отсев известных спамеров по user_id до LLM). Включён по умолчанию
+  (`CAS_ENABLED=false` отключает); `CAS_API_URL` по умолчанию
+  `https://api.cas.chat/check`, таймаут `3000` мс. Работает только при включённой
+  LLM-модерации (модуль модерации подключается лишь при `LLM_API_KEY`).
+- `MODERATION_FIRST_MESSAGES` — сколько первых «чистых» сообщений новичка проверять,
+  прежде чем считать его доверенным и пропускать модерацию (по умолчанию `3`).
 
-Валидация в `src/config.ts`: отсутствие обязательной переменной кидает ошибку на старте.
+Валидация в `src/config.ts`: отсутствие обязательной переменной кидает ошибку на
+старте. Опциональные числовые переменные (`CAS_TIMEOUT_MS`, `MODERATION_FIRST_MESSAGES`)
+при некорректном значении логируют предупреждение и откатываются на дефолт, не валя бот.
 
 ## Архитектура
 
@@ -55,8 +64,9 @@ src/
     callbacks.ts       inline-кнопки: навигация, тогглы, режим, капча
     moderation.ts      message/channel_post — LLM-модерация спама (опц.)
   moderation/
-    heuristics.ts      дешёвый пре-фильтр перед вызовом LLM
+    heuristics.ts      пре-фильтр перед LLM: ссылки/метаданные → эскалация
     classify.ts        OpenAI-compatible классификация спама
+    cas.ts             проверка user_id по внешнему blocklist CAS (кэш + fail-open)
   index.ts             Bun.serve + webhook + setWebhook на старте
 ```
 
@@ -88,13 +98,26 @@ src/
   остаются висеть.
 - **LLM-модерация (опц., opt-in).** Подключается в `bot.ts` только при
   `config.moderationEnabled` (задан `LLM_API_KEY`). Per-channel флаг
-  `moderation_enabled` (по умолчанию `0`). Поток: `message`/`channel_post` →
-  `getChannel` (гейт `active && moderation_enabled`) → `shouldClassify` (дешёвый
-  пре-фильтр) → `classifySpam` (OpenAI-compatible, fail-open) → при спаме
-  `deleteMessage` (MVP — без бана). Классификатор инжектируется в
-  `registerModeration` (в тестах — стаб, без сети). **Privacy mode:** в группах бот
-  читает сообщения только при выключенном privacy mode в BotFather ИЛИ будучи
-  админом (наш бот — админ, покрыто); для каналов нужен `channel_post` и админ-статус.
+  `moderation_enabled` (по умолчанию `0`). Многослойный конвейер перед дорогим LLM
+  (`handlers/moderation.ts`): `getChannel` (гейт `active && moderation_enabled &&
+  can_delete`) → **доверие новичка** (`getSeenCount >= MODERATION_FIRST_MESSAGES` →
+  пропуск) → **CAS** (`checkCas` по `user_id`, попадание → `deleteMessage`) →
+  `shouldClassify` (расширенный пре-фильтр: ссылки/упоминания + метаданные —
+  эмодзи-флуд, смешение алфавитов, abnormal spacing, форвард, кнопки, медиа без
+  подписи) → `classifySpam` (OpenAI-compatible, fail-open) → при спаме
+  `deleteMessage` (MVP — без бана). Удаляют только два жёстких сигнала: CAS и LLM;
+  эвристики лишь эскалируют к LLM. `classify` и `checkCas` инжектируются в
+  `registerModeration(bot, { classify, checkCas })` (в тестах — стабы, без сети;
+  CAS обязательно стабить, иначе тест пойдёт в `api.cas.chat`).
+  **Инвариант доверия:** `bumpSeen` (инкремент `moderation_seen.msg_count`)
+  вызывается ТОЛЬКО для чистых сообщений (`shouldClassify=false` или LLM=ham),
+  НИКОГДА при CAS-hit/LLM-spam — иначе спамер за N сообщений станет доверенным.
+  Фичи доверия и CAS применяются только к `message` (есть `from`); `channel_post`
+  (нет автора) идёт укороченным путём `gate → shouldClassify → classify → delete`.
+  Команды бота (`bot_command` со `offset=0`) не модерируются. **Privacy mode:** в
+  группах бот читает сообщения только при выключенном privacy mode в BotFather ИЛИ
+  будучи админом (наш бот — админ, покрыто); для каналов нужен `channel_post` и
+  админ-статус.
 - **Авто-регистрация по `my_chat_member`.** Канал регистрируется (`upsertChannel`),
   когда бот стал `administrator` с правом приглашать (`can_invite_users`) **ИЛИ**
   удалять (`can_delete_messages`) — права независимы и используются порознь. Эти два
@@ -142,6 +165,11 @@ src/
 - `captcha_pending` — состояние окна капчи: PK `(chat_id, user_id)`,
   `user_chat_id` (для DM), `requested_at` (для идемпотентного `logJoin` при
   одобрении), `prompt_msg_id`. `INSERT OR IGNORE` → ретрай вебхука не задвоит.
+- `moderation_seen` — трекинг доверия новичков для модерации: PK `(chat_id,
+  user_id)`, `msg_count` (число чистых сообщений автора), `last_seen`. `bumpSeen`
+  (UPSERT `+1`) зовётся только для чистых сообщений; при `msg_count >=
+  MODERATION_FIRST_MESSAGES` модерация пропускается. Чистится по ретеншену
+  (`pruneModerationSeen`, 30 дней по `last_seen`, см. `src/index.ts`).
 
 ## Конвенции
 

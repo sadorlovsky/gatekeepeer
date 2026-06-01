@@ -11,6 +11,7 @@ let joinRequestModule: typeof import("../src/handlers/joinRequest.ts");
 let chatMemberModule: typeof import("../src/handlers/chatMember.ts");
 let moderationModule: typeof import("../src/handlers/moderation.ts");
 let heuristicsModule: typeof import("../src/moderation/heuristics.ts");
+let config: typeof import("../src/config.ts").config;
 
 function seedLegacyDb(): void {
   const legacy = new Database(dbPath, { create: true });
@@ -118,6 +119,7 @@ beforeAll(async () => {
   chatMemberModule = await import("../src/handlers/chatMember.ts");
   moderationModule = await import("../src/handlers/moderation.ts");
   heuristicsModule = await import("../src/moderation/heuristics.ts");
+  config = (await import("../src/config.ts")).config;
 });
 
 type Handler = (ctx: any) => Promise<void> | void;
@@ -789,59 +791,214 @@ describe("join request modes", () => {
   });
 });
 
-describe("spam moderation", () => {
-  test("shouldClassify gates on the moderation flag and content heuristics", () => {
+describe("heuristics helpers", () => {
+  test("countEmoji counts pictographic emoji", () => {
+    expect(heuristicsModule.countEmoji("plain text")).toBe(0);
+    expect(heuristicsModule.countEmoji("🔥🔥🔥🔥🔥🔥 sale")).toBe(6);
+  });
+
+  test("hasMixedScripts flags Latin+Cyrillic inside a word, not separate words", () => {
+    // «kупить» — латинская k в кириллическом слове (обфускация).
+    expect(heuristicsModule.hasMixedScripts("kупить дёшево")).toBe(true);
+    // Нормальный двуязычный текст с раздельными словами — не сигнал.
+    expect(heuristicsModule.hasMixedScripts("hello мир hello")).toBe(false);
+  });
+
+  test("abnormalSpacing flags letter-spaced text", () => {
+    expect(heuristicsModule.abnormalSpacing("к у п и т ь")).toBe(true);
+    expect(heuristicsModule.abnormalSpacing("обычное сообщение в чате")).toBe(false);
+  });
+
+  test("shouldClassify gates on the flag and escalates on content/metadata", () => {
     const on = { moderation_enabled: 1 } as any;
     const off = { moderation_enabled: 0 } as any;
 
-    expect(heuristicsModule.shouldClassify("visit https://t.me/scam now", off)).toBe(false);
-    expect(heuristicsModule.shouldClassify(undefined, on)).toBe(false);
-    expect(heuristicsModule.shouldClassify("hi", on)).toBe(false);
-    expect(heuristicsModule.shouldClassify("just a normal message here", on)).toBe(false);
-    expect(heuristicsModule.shouldClassify("visit https://t.me/scam now", on)).toBe(true);
+    expect(heuristicsModule.shouldClassify({ text: "visit https://t.me/scam now" }, off)).toBe(false);
+    expect(heuristicsModule.shouldClassify({}, on)).toBe(false);
+    expect(heuristicsModule.shouldClassify({ text: "hi" }, on)).toBe(false);
+    expect(heuristicsModule.shouldClassify({ text: "just a normal message here" }, on)).toBe(false);
+    expect(heuristicsModule.shouldClassify({ text: "visit https://t.me/scam now" }, on)).toBe(true);
+    // Метаданные-сигналы без ссылок/упоминаний в тексте.
+    expect(heuristicsModule.shouldClassify({ text: "обычный текст", forward_origin: {} }, on)).toBe(true);
+    expect(
+      heuristicsModule.shouldClassify(
+        { text: "жми кнопку", reply_markup: { inline_keyboard: [[{}]] } },
+        on,
+      ),
+    ).toBe(true);
+    expect(heuristicsModule.shouldClassify({ text: "kупить дёшево сейчас", }, on)).toBe(true);
+    // Медиа без подписи → эскалация.
+    expect(heuristicsModule.shouldClassify({ photo: [{}] }, on)).toBe(true);
+  });
+});
+
+describe("newcomer trust tracking", () => {
+  test("getSeenCount returns 0 for unknown, bumpSeen creates then increments", async () => {
+    expect(await db.getSeenCount(-9001, 42)).toBe(0);
+    await db.bumpSeen(-9001, 42);
+    expect(await db.getSeenCount(-9001, 42)).toBe(1);
+    await db.bumpSeen(-9001, 42);
+    expect(await db.getSeenCount(-9001, 42)).toBe(2);
   });
 
+  test("pruneModerationSeen removes rows and returns the count", async () => {
+    await db.bumpSeen(-9002, 1);
+    await db.bumpSeen(-9002, 2);
+    const removed = await db.pruneModerationSeen(0);
+    expect(removed).toBeGreaterThanOrEqual(2);
+    expect(await db.getSeenCount(-9002, 1)).toBe(0);
+  });
+});
+
+describe("spam moderation", () => {
+  // checkCas во всех тестах стабится — иначе реальная проверка пойдёт в сеть.
+  const noCas = async () => false;
+
   test("deletes a message only when the classifier flags it as spam", async () => {
-    await db.upsertChannel({ chatId: -750, title: "Mod chan", type: "channel", addedBy: 75 });
+    await db.upsertChannel({ chatId: -750, title: "Mod chan", type: "supergroup", addedBy: 75 });
     await db.setModerationEnabled(-750, 75, true);
 
     const spamRun = eventHarness();
-    moderationModule.registerModeration(spamRun.bot, async () => ({ spam: true, reason: "тест" }));
+    moderationModule.registerModeration(spamRun.bot, {
+      classify: async () => ({ spam: true, reason: "тест" }),
+      checkCas: noCas,
+    });
     let deletedSpam = 0;
     await spamRun.handlers.message?.({
-      message: { text: "spam https://x.example", message_id: 1 },
+      message: { text: "spam https://x.example", message_id: 1, from: { id: 7501 } },
       chat: { id: -750 },
       deleteMessage: async () => {
         deletedSpam += 1;
       },
     });
     expect(deletedSpam).toBe(1);
+    // Спам не продвигает доверие.
+    expect(await db.getSeenCount(-750, 7501)).toBe(0);
 
     const hamRun = eventHarness();
-    moderationModule.registerModeration(hamRun.bot, async () => ({ spam: false, reason: "ok" }));
+    moderationModule.registerModeration(hamRun.bot, {
+      classify: async () => ({ spam: false, reason: "ok" }),
+      checkCas: noCas,
+    });
     let deletedHam = 0;
     await hamRun.handlers.message?.({
-      message: { text: "spam https://x.example", message_id: 2 },
+      message: { text: "spam https://x.example", message_id: 2, from: { id: 7502 } },
       chat: { id: -750 },
       deleteMessage: async () => {
         deletedHam += 1;
       },
     });
     expect(deletedHam).toBe(0);
+    // Ham продвигает доверие.
+    expect(await db.getSeenCount(-750, 7502)).toBe(1);
   });
 
-  test("does not classify when moderation is disabled for the channel", async () => {
-    await db.upsertChannel({ chatId: -751, title: "Mod off", type: "channel", addedBy: 75 });
+  test("CAS hit deletes before the classifier runs", async () => {
+    await db.upsertChannel({ chatId: -753, title: "CAS chan", type: "supergroup", addedBy: 75 });
+    await db.setModerationEnabled(-753, 75, true);
 
     const run = eventHarness();
     let classified = 0;
-    moderationModule.registerModeration(run.bot, async () => {
-      classified += 1;
-      return { spam: true, reason: "не должно вызваться" };
+    moderationModule.registerModeration(run.bot, {
+      classify: async () => {
+        classified += 1;
+        return { spam: false, reason: "не должно вызваться" };
+      },
+      checkCas: async () => true,
     });
     let deleted = 0;
     await run.handlers.message?.({
-      message: { text: "spam https://x.example", message_id: 3 },
+      message: { text: "обычное сообщение", message_id: 5, from: { id: 7531 } },
+      chat: { id: -753 },
+      deleteMessage: async () => {
+        deleted += 1;
+      },
+    });
+    expect(deleted).toBe(1);
+    expect(classified).toBe(0);
+    // CAS-попадание не продвигает доверие.
+    expect(await db.getSeenCount(-753, 7531)).toBe(0);
+  });
+
+  test("trusted newcomer skips checks after N clean messages", async () => {
+    await db.upsertChannel({ chatId: -754, title: "Trust chan", type: "supergroup", addedBy: 75 });
+    await db.setModerationEnabled(-754, 75, true);
+    const N = config.moderation.firstMessages;
+
+    const run = eventHarness();
+    let classified = 0;
+    let casCalls = 0;
+    moderationModule.registerModeration(run.bot, {
+      classify: async () => {
+        classified += 1;
+        return { spam: false, reason: "ok" };
+      },
+      checkCas: async () => {
+        casCalls += 1;
+        return false;
+      },
+    });
+    // N чистых (не подозрительных) сообщений → доверие достигнуто.
+    for (let i = 0; i < N; i++) {
+      await run.handlers.message?.({
+        message: { text: "просто болтаю о погоде", message_id: 100 + i, from: { id: 7541 } },
+        chat: { id: -754 },
+        deleteMessage: async () => {},
+      });
+    }
+    expect(await db.getSeenCount(-754, 7541)).toBe(N);
+
+    const casBefore = casCalls;
+    // (N+1)-е сообщение — даже подозрительное — не доходит до CAS/LLM.
+    await run.handlers.message?.({
+      message: { text: "купи сейчас https://t.me/scam", message_id: 999, from: { id: 7541 } },
+      chat: { id: -754 },
+      deleteMessage: async () => {},
+    });
+    expect(casCalls).toBe(casBefore);
+    expect(classified).toBe(0);
+  });
+
+  test("channel_post takes the short path (no CAS, no seen tracking)", async () => {
+    await db.upsertChannel({ chatId: -755, title: "Chan post", type: "channel", addedBy: 75 });
+    await db.setModerationEnabled(-755, 75, true);
+
+    const run = eventHarness();
+    let casCalls = 0;
+    moderationModule.registerModeration(run.bot, {
+      classify: async () => ({ spam: true, reason: "тест" }),
+      checkCas: async () => {
+        casCalls += 1;
+        return false;
+      },
+    });
+    let deleted = 0;
+    await run.handlers.channel_post?.({
+      channelPost: { text: "spam https://x.example", message_id: 6 },
+      chat: { id: -755 },
+      deleteMessage: async () => {
+        deleted += 1;
+      },
+    });
+    expect(deleted).toBe(1);
+    expect(casCalls).toBe(0);
+  });
+
+  test("does not classify when moderation is disabled for the channel", async () => {
+    await db.upsertChannel({ chatId: -751, title: "Mod off", type: "supergroup", addedBy: 75 });
+
+    const run = eventHarness();
+    let classified = 0;
+    moderationModule.registerModeration(run.bot, {
+      classify: async () => {
+        classified += 1;
+        return { spam: true, reason: "не должно вызваться" };
+      },
+      checkCas: noCas,
+    });
+    let deleted = 0;
+    await run.handlers.message?.({
+      message: { text: "spam https://x.example", message_id: 3, from: { id: 7511 } },
       chat: { id: -751 },
       deleteMessage: async () => {
         deleted += 1;
@@ -866,13 +1023,16 @@ describe("spam moderation", () => {
 
     const run = eventHarness();
     let classified = 0;
-    moderationModule.registerModeration(run.bot, async () => {
-      classified += 1;
-      return { spam: true, reason: "не должно вызваться" };
+    moderationModule.registerModeration(run.bot, {
+      classify: async () => {
+        classified += 1;
+        return { spam: true, reason: "не должно вызваться" };
+      },
+      checkCas: noCas,
     });
     let deleted = 0;
     await run.handlers.message?.({
-      message: { text: "spam https://x.example", message_id: 4 },
+      message: { text: "spam https://x.example", message_id: 4, from: { id: 7521 } },
       chat: { id: -752 },
       deleteMessage: async () => {
         deleted += 1;

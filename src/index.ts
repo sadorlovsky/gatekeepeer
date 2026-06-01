@@ -3,7 +3,7 @@
 import { webhookCallback } from "grammy";
 import { config } from "./config.ts";
 import { bot } from "./bot.ts";
-import { prunePendingCaptcha, pruneJoinEvents } from "./db.ts";
+import { prunePendingCaptcha, pruneJoinEvents, pruneModerationSeen } from "./db.ts";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
@@ -12,6 +12,9 @@ const MINUTE_MS = 60 * 1000;
 const JOIN_EVENTS_RETENTION_MS = 90 * DAY_MS;
 // Сколько ждём прохождения капчи; после — запись удаляется, заявка остаётся висеть.
 const CAPTCHA_TTL_MS = 30 * MINUTE_MS;
+// Сколько держим трекинг доверия новичков. Чистим неактивных, чтобы таблица не
+// росла бесконечно; активный доверенный участник обновляет last_seen и не протухает.
+const MODERATION_SEEN_RETENTION_MS = 30 * DAY_MS;
 
 // Важно: chat_join_request и my_chat_member НЕ входят в набор по умолчанию —
 // перечисляем их явно, иначе бот не получит заявки. channel_post нужен для
@@ -65,6 +68,13 @@ setInterval(async () => {
   const expired = await prunePendingCaptcha(CAPTCHA_TTL_MS);
   if (expired.length > 0) console.log(`Истёкших капч очищено: ${expired.length}`);
 }, MINUTE_MS);
+
+// Трекинг доверия новичков: разово на старте и далее раз в сутки.
+await pruneModerationSeen(MODERATION_SEEN_RETENTION_MS);
+setInterval(async () => {
+  const removed = await pruneModerationSeen(MODERATION_SEEN_RETENTION_MS);
+  if (removed > 0) console.log(`Очищено записей трекинга новичков: ${removed}`);
+}, DAY_MS);
 
 const server = Bun.serve({
   port: config.port,

@@ -26,6 +26,15 @@ export interface Channel {
   created_at: number;
 }
 
+/** Трекинг доверия новичка в чате: сколько «чистых» сообщений он уже прислал. */
+export interface ModerationSeen {
+  chat_id: number;
+  user_id: number;
+  msg_count: number; // число сообщений, признанных чистыми
+  last_seen: number; // когда последний раз учли сообщение (для ретеншена)
+  created_at: number;
+}
+
 /** Заявитель, ожидающий прохождения капчи (окно верификации в личке бота). */
 export interface CaptchaPending {
   chat_id: number;
@@ -90,6 +99,20 @@ await client.execute(`
     requested_at  INTEGER NOT NULL,
     prompt_msg_id INTEGER,
     created_at    INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+  )
+`);
+
+// Трекинг доверия новичков для модерации: после N «чистых» сообщений автора
+// перестаём гонять дорогие проверки. Новая таблица — на legacy-БД её просто не
+// было, миграция колонок не нужна.
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS moderation_seen (
+    chat_id    INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    msg_count  INTEGER NOT NULL DEFAULT 0,
+    last_seen  INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
     PRIMARY KEY (chat_id, user_id)
   )
 `);
@@ -161,6 +184,9 @@ if (!channelCols.has("can_delete")) {
 
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_channels_added_by ON channels(added_by)`);
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_captcha_created ON captcha_pending(created_at)`);
+// Ретеншен трекинга чистим по last_seen: активный доверенный участник не должен
+// «протухать», иначе обнуление вернёт его под лишние проверки.
+await client.execute(`CREATE INDEX IF NOT EXISTS idx_moderation_seen_last ON moderation_seen(last_seen)`);
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_chat ON join_events(chat_id)`);
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_created ON join_events(created_at)`);
 // Идемпотентность журнала: одна и та же заявка (chat_id+user_id+время её подачи
@@ -454,4 +480,43 @@ export async function prunePendingCaptcha(olderThanMs: number): Promise<CaptchaP
     });
   }
   return rows;
+}
+
+// --- Трекинг доверия новичков (модерация) ---
+
+/** Сколько чистых сообщений автор уже прислал в этот чат (0, если неизвестен). */
+export async function getSeenCount(chatId: number, userId: number): Promise<number> {
+  const res = await client.execute({
+    sql: `SELECT msg_count FROM moderation_seen WHERE chat_id = $chat_id AND user_id = $user_id`,
+    args: { chat_id: chatId, user_id: userId },
+  });
+  return Number(res.rows[0]?.msg_count ?? 0);
+}
+
+/**
+ * Учитывает ещё одно «чистое» сообщение автора: первое создаёт строку (msg_count=1),
+ * последующие инкрементят. Вызывать ТОЛЬКО для не-спама — иначе спамер «дослался»
+ * бы до статуса доверенного и обошёл модерацию.
+ */
+export async function bumpSeen(chatId: number, userId: number): Promise<void> {
+  const now = Date.now();
+  await client.execute({
+    sql: `
+      INSERT INTO moderation_seen (chat_id, user_id, msg_count, last_seen, created_at)
+      VALUES ($chat_id, $user_id, 1, $now, $now)
+      ON CONFLICT(chat_id, user_id) DO UPDATE SET
+        msg_count = msg_count + 1,
+        last_seen = $now
+    `,
+    args: { chat_id: chatId, user_id: userId, now },
+  });
+}
+
+/** Чистит трекинг старше olderThanMs (по last_seen). Возвращает число удалённых строк. */
+export async function pruneModerationSeen(olderThanMs: number): Promise<number> {
+  const res = await client.execute({
+    sql: `DELETE FROM moderation_seen WHERE last_seen < $cutoff`,
+    args: { cutoff: Date.now() - olderThanMs },
+  });
+  return res.rowsAffected;
 }
