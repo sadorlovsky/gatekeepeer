@@ -49,6 +49,24 @@ function buildDbConfig(): {
   return { url: `file:${dbPath}`, isRemote: false };
 }
 
+// LLM для модерации спама. Используем OpenAI-compatible протокол
+// (POST {baseUrl}/chat/completions): подходит OpenAI, OpenRouter, локальная модель.
+// Всё опционально — без ключа модуль модерации не подключается.
+const llmApiKey = process.env.LLM_API_KEY?.trim();
+
+// Целое число из env с мягкой деградацией: кривой/отрицательный ввод не валит
+// бота на старте (фичи модерации опциональны), а откатывается на дефолт.
+function posIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    console.warn(`${name}=${raw} некорректно (нужно целое >= 1), используем ${fallback}`);
+    return fallback;
+  }
+  return n;
+}
+
 export const config = {
   botToken: required("BOT_TOKEN"),
   webhookUrl: required("WEBHOOK_URL").replace(/\/+$/, ""),
@@ -57,4 +75,23 @@ export const config = {
   db: buildDbConfig(),
   // Путь, по которому сервер принимает апдейты от Telegram.
   webhookPath: "/webhook",
+  llm: {
+    apiKey: llmApiKey,
+    baseUrl: (process.env.LLM_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, ""),
+    model: process.env.LLM_MODEL?.trim() || "gpt-4o-mini",
+  },
+  // Модерация включается только при заданном ключе LLM.
+  moderationEnabled: Boolean(llmApiKey),
+  // Внешний blocklist Combot Anti-Spam (CAS): дешёвый отсев известных спамеров
+  // по user_id перед дорогим LLM. Включён по умолчанию, отключается CAS_ENABLED=false.
+  cas: {
+    enabled: process.env.CAS_ENABLED !== "false",
+    apiUrl: process.env.CAS_API_URL?.trim() || "https://api.cas.chat/check",
+    timeoutMs: posIntEnv("CAS_TIMEOUT_MS", 3000),
+  },
+  moderation: {
+    // Сколько первых сообщений новичка проверяем, прежде чем считать его
+    // доверенным и пропускать модерацию (экономия LLM-вызовов).
+    firstMessages: posIntEnv("MODERATION_FIRST_MESSAGES", 3),
+  },
 } as const;

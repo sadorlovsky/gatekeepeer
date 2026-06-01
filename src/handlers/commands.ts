@@ -1,7 +1,12 @@
 // Команды пульта в личке. Данные скоупятся по пользователю (ctx.from.id).
 
 import type { Bot, Context } from "grammy";
-import { listChannelsByOwner, statsByOwner } from "../db.ts";
+import {
+  listChannelsByOwner,
+  listPendingWelcome,
+  markWelcomePending,
+  statsByOwner,
+} from "../db.ts";
 import { channelsKeyboard } from "../keyboards.ts";
 
 const HELP = [
@@ -22,6 +27,24 @@ const HELP = [
 export function registerCommands(bot: Bot): void {
   bot.command("start", async (ctx: Context) => {
     await ctx.reply(HELP);
+
+    // Догоняем приветствия по каналам, подключённым до того, как владелец нажал
+    // /start (тогда DM из chatMember не доставился и был отложен).
+    if (ctx.chat?.type !== "private") return;
+    const userId = ctx.from?.id;
+    if (!userId) return;
+    const pending = await listPendingWelcome(userId);
+    for (const ch of pending) {
+      try {
+        await ctx.reply(
+          `✅ Канал «${ch.title ?? ch.chat_id}» подключён.\n` +
+            `Авто-приём заявок включён. Управление — /channels.`,
+        );
+      } catch {
+        continue; // не удалось доставить — оставляем флаг, попробуем в следующий раз
+      }
+      await markWelcomePending(ch.chat_id, false);
+    }
   });
 
   bot.command("help", async (ctx: Context) => {
@@ -41,10 +64,9 @@ export function registerCommands(bot: Bot): void {
       return;
     }
 
-    await ctx.reply(
-      "Ваши каналы. Нажмите, чтобы включить (✅) или выключить (⛔️) авто-приём:",
-      { reply_markup: channelsKeyboard(channels) },
-    );
+    await ctx.reply("Ваши каналы. Выберите канал, чтобы настроить:", {
+      reply_markup: channelsKeyboard(channels),
+    });
   });
 
   bot.command("status", async (ctx: Context) => {

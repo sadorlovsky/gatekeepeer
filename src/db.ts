@@ -7,14 +7,42 @@
 import { createClient } from "@libsql/client";
 import { config } from "./config.ts";
 
+/** Режим обработки заявок, когда авто-приём включён (auto_approve = 1). */
+export type JoinMode = "approve" | "decline" | "captcha";
+
 export interface Channel {
   chat_id: number;
   title: string | null;
   type: string | null;
   added_by: number;
-  auto_approve: number; // 0 | 1
+  auto_approve: number; // 0 | 1 — мастер-выключатель приёма
   active: number; // 0 | 1
   approved_count: number; // all-time счётчик одобренных заявок
+  join_mode: string; // JoinMode — что делать с заявкой, когда приём включён
+  welcome_pending: number; // 0 | 1 — приветствие владельцу не доставлено (нет /start)
+  moderation_enabled: number; // 0 | 1 — LLM-модерация спама в чате
+  can_invite: number; // 0 | 1 — у бота есть право приглашать (приём заявок возможен)
+  can_delete: number; // 0 | 1 — у бота есть право удалять сообщения (модерация возможна)
+  created_at: number;
+}
+
+/** Трекинг доверия новичка в чате: сколько «чистых» сообщений он уже прислал. */
+export interface ModerationSeen {
+  chat_id: number;
+  user_id: number;
+  msg_count: number; // число сообщений, признанных чистыми
+  last_seen: number; // когда последний раз учли сообщение (для ретеншена)
+  created_at: number;
+}
+
+/** Заявитель, ожидающий прохождения капчи (окно верификации в личке бота). */
+export interface CaptchaPending {
+  chat_id: number;
+  user_id: number;
+  user_chat_id: number; // личка с заявителем из chat_join_request.user_chat_id
+  username: string | null;
+  requested_at: number; // chat_join_request.date (сек) — для идемпотентности logJoin
+  prompt_msg_id: number | null; // id сообщения-капчи в личке, чтобы отредактировать
   created_at: number;
 }
 
@@ -32,14 +60,19 @@ if (!config.db.isRemote) {
 
 await client.execute(`
   CREATE TABLE IF NOT EXISTS channels (
-    chat_id        INTEGER PRIMARY KEY,
-    title          TEXT,
-    type           TEXT,
-    added_by       INTEGER NOT NULL,
-    auto_approve   INTEGER NOT NULL DEFAULT 1,
-    active         INTEGER NOT NULL DEFAULT 1,
-    approved_count INTEGER NOT NULL DEFAULT 0,
-    created_at     INTEGER NOT NULL
+    chat_id            INTEGER PRIMARY KEY,
+    title              TEXT,
+    type               TEXT,
+    added_by           INTEGER NOT NULL,
+    auto_approve       INTEGER NOT NULL DEFAULT 1,
+    active             INTEGER NOT NULL DEFAULT 1,
+    approved_count     INTEGER NOT NULL DEFAULT 0,
+    join_mode          TEXT NOT NULL DEFAULT 'approve',
+    welcome_pending    INTEGER NOT NULL DEFAULT 0,
+    moderation_enabled INTEGER NOT NULL DEFAULT 0,
+    can_invite         INTEGER NOT NULL DEFAULT 1,
+    can_delete         INTEGER NOT NULL DEFAULT 1,
+    created_at         INTEGER NOT NULL
   )
 `);
 
@@ -52,6 +85,35 @@ await client.execute(`
     decision     TEXT NOT NULL,
     requested_at INTEGER NOT NULL,
     created_at   INTEGER NOT NULL
+  )
+`);
+
+// Состояние капчи: заявители, ожидающие подтверждения «я человек» в личке бота.
+// PK (chat_id, user_id) + INSERT OR IGNORE → переобработка вебхука не задвоит строку.
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS captcha_pending (
+    chat_id       INTEGER NOT NULL,
+    user_id       INTEGER NOT NULL,
+    user_chat_id  INTEGER NOT NULL,
+    username      TEXT,
+    requested_at  INTEGER NOT NULL,
+    prompt_msg_id INTEGER,
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
+  )
+`);
+
+// Трекинг доверия новичков для модерации: после N «чистых» сообщений автора
+// перестаём гонять дорогие проверки. Новая таблица — на legacy-БД её просто не
+// было, миграция колонок не нужна.
+await client.execute(`
+  CREATE TABLE IF NOT EXISTS moderation_seen (
+    chat_id    INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,
+    msg_count  INTEGER NOT NULL DEFAULT 0,
+    last_seen  INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, user_id)
   )
 `);
 
@@ -96,8 +158,35 @@ if (!channelCols.has("approved_count")) {
     )
   `);
 }
+// Режим заявок: новый столбец на legacy-БД. Дефолт 'approve' сохраняет текущее
+// поведение — вместе с мастер-флагом auto_approve канал работает как раньше.
+if (!channelCols.has("join_mode")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN join_mode TEXT NOT NULL DEFAULT 'approve'`);
+}
+// Флаг отложенного приветствия (DM не дошёл, владелец не нажимал /start).
+if (!channelCols.has("welcome_pending")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN welcome_pending INTEGER NOT NULL DEFAULT 0`);
+}
+// LLM-модерация спама — по умолчанию выключена (opt-in, без сюрпризного чтения).
+if (!channelCols.has("moderation_enabled")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN moderation_enabled INTEGER NOT NULL DEFAULT 0`);
+}
+// Права бота в чате. Дефолт 1 для обоих: legacy-каналы были зарегистрированы
+// при наличии права приглашать (can_invite=1 точно верно), а can_delete ставим
+// оптимистично, чтобы не оборвать уже включённую модерацию — реальные права всё
+// равно перепроверятся при следующем my_chat_member и deleteMessage fail-safe.
+if (!channelCols.has("can_invite")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN can_invite INTEGER NOT NULL DEFAULT 1`);
+}
+if (!channelCols.has("can_delete")) {
+  await client.execute(`ALTER TABLE channels ADD COLUMN can_delete INTEGER NOT NULL DEFAULT 1`);
+}
 
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_channels_added_by ON channels(added_by)`);
+await client.execute(`CREATE INDEX IF NOT EXISTS idx_captcha_created ON captcha_pending(created_at)`);
+// Ретеншен трекинга чистим по last_seen: активный доверенный участник не должен
+// «протухать», иначе обнуление вернёт его под лишние проверки.
+await client.execute(`CREATE INDEX IF NOT EXISTS idx_moderation_seen_last ON moderation_seen(last_seen)`);
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_chat ON join_events(chat_id)`);
 await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_created ON join_events(created_at)`);
 // Идемпотентность журнала: одна и та же заявка (chat_id+user_id+время её подачи
@@ -109,25 +198,31 @@ await client.execute(
 // --- Каналы ---
 
 const UPSERT_CHANNEL_SQL = `
-  INSERT INTO channels (chat_id, title, type, added_by, auto_approve, active, created_at)
-  VALUES ($chat_id, $title, $type, $added_by, 1, 1, $created_at)
+  INSERT INTO channels (chat_id, title, type, added_by, auto_approve, active, can_invite, can_delete, created_at)
+  VALUES ($chat_id, $title, $type, $added_by, 1, 1, $can_invite, $can_delete, $created_at)
   ON CONFLICT(chat_id) DO UPDATE SET
-    title  = excluded.title,
-    type   = excluded.type,
-    active = 1
+    title      = excluded.title,
+    type       = excluded.type,
+    active     = 1,
+    can_invite = excluded.can_invite,
+    can_delete = excluded.can_delete
 `;
 
 /**
  * Регистрирует канал (или реактивирует уже известный) при добавлении бота админом.
  * Владелец (added_by) — создатель канала (creator), определяется при первой
  * регистрации (см. handlers/chatMember.ts) и НЕ перезаписывается: иначе со-админ,
- * тронувший права бота, перехватил бы контроль над каналом.
+ * тронувший права бота, перехватил бы контроль над каналом. Права бота
+ * (canInvite/canDelete) обновляются и при реактивации — они отражают текущий
+ * набор прав. По умолчанию true (полнофункциональный бот) для вызовов без флагов.
  */
 export async function upsertChannel(params: {
   chatId: number;
   title: string | null;
   type: string | null;
   addedBy: number;
+  canInvite?: boolean;
+  canDelete?: boolean;
 }): Promise<void> {
   await client.execute({
     sql: UPSERT_CHANNEL_SQL,
@@ -136,6 +231,8 @@ export async function upsertChannel(params: {
       title: params.title,
       type: params.type,
       added_by: params.addedBy,
+      can_invite: params.canInvite === false ? 0 : 1,
+      can_delete: params.canDelete === false ? 0 : 1,
       created_at: Date.now(),
     },
   });
@@ -181,6 +278,52 @@ export async function setAutoApprove(
     args: { chat_id: chatId, owner: ownerId, value: value ? 1 : 0 },
   });
   return res.rowsAffected > 0;
+}
+
+/**
+ * Меняет режим обработки заявок. Только для своего канала (скоуп в SQL).
+ * Возвращает true, если запись действительно изменена.
+ */
+export async function setJoinMode(
+  chatId: number,
+  ownerId: number,
+  mode: JoinMode,
+): Promise<boolean> {
+  const res = await client.execute({
+    sql: `UPDATE channels SET join_mode = $mode WHERE chat_id = $chat_id AND added_by = $owner`,
+    args: { chat_id: chatId, owner: ownerId, mode },
+  });
+  return res.rowsAffected > 0;
+}
+
+/** Включает/выключает LLM-модерацию. Только для своего канала. */
+export async function setModerationEnabled(
+  chatId: number,
+  ownerId: number,
+  value: boolean,
+): Promise<boolean> {
+  const res = await client.execute({
+    sql: `UPDATE channels SET moderation_enabled = $value WHERE chat_id = $chat_id AND added_by = $owner`,
+    args: { chat_id: chatId, owner: ownerId, value: value ? 1 : 0 },
+  });
+  return res.rowsAffected > 0;
+}
+
+/** Помечает/снимает флаг отложенного приветствия (вызывается по chat_id бота). */
+export async function markWelcomePending(chatId: number, value: boolean): Promise<void> {
+  await client.execute({
+    sql: `UPDATE channels SET welcome_pending = $value WHERE chat_id = $chat_id`,
+    args: { chat_id: chatId, value: value ? 1 : 0 },
+  });
+}
+
+/** Каналы владельца с недоставленным приветствием (для выдачи на /start). */
+export async function listPendingWelcome(ownerId: number): Promise<Channel[]> {
+  const res = await client.execute({
+    sql: `SELECT * FROM channels WHERE added_by = $owner AND welcome_pending = 1 AND active = 1 ORDER BY created_at`,
+    args: { owner: ownerId },
+  });
+  return res.rows as unknown as Channel[];
 }
 
 // --- Журнал заявок ---
@@ -254,6 +397,125 @@ export async function statsByOwner(ownerId: number): Promise<OwnerStat[]> {
 export async function pruneJoinEvents(olderThanMs: number): Promise<number> {
   const res = await client.execute({
     sql: `DELETE FROM join_events WHERE created_at < $cutoff`,
+    args: { cutoff: Date.now() - olderThanMs },
+  });
+  return res.rowsAffected;
+}
+
+// --- Капча ---
+
+/** Заводит запись ожидания капчи. INSERT OR IGNORE → идемпотентно при ретрае. */
+export async function addCaptchaPending(params: {
+  chatId: number;
+  userId: number;
+  userChatId: number;
+  username: string | null;
+  requestedAt: number;
+}): Promise<void> {
+  await client.execute({
+    sql: `
+      INSERT OR IGNORE INTO captcha_pending
+        (chat_id, user_id, user_chat_id, username, requested_at, created_at)
+      VALUES ($chat_id, $user_id, $user_chat_id, $username, $requested_at, $created_at)
+    `,
+    args: {
+      chat_id: params.chatId,
+      user_id: params.userId,
+      user_chat_id: params.userChatId,
+      username: params.username,
+      requested_at: params.requestedAt,
+      created_at: Date.now(),
+    },
+  });
+}
+
+export async function getCaptchaPending(
+  chatId: number,
+  userId: number,
+): Promise<CaptchaPending | null> {
+  const res = await client.execute({
+    sql: `SELECT * FROM captcha_pending WHERE chat_id = $chat_id AND user_id = $user_id`,
+    args: { chat_id: chatId, user_id: userId },
+  });
+  const row = res.rows[0];
+  return row ? (row as unknown as CaptchaPending) : null;
+}
+
+/** Сохраняет id отправленного сообщения-капчи, чтобы потом его отредактировать. */
+export async function setCaptchaPromptMsgId(
+  chatId: number,
+  userId: number,
+  msgId: number,
+): Promise<void> {
+  await client.execute({
+    sql: `UPDATE captcha_pending SET prompt_msg_id = $msg WHERE chat_id = $chat_id AND user_id = $user_id`,
+    args: { chat_id: chatId, user_id: userId, msg: msgId },
+  });
+}
+
+export async function deleteCaptchaPending(chatId: number, userId: number): Promise<void> {
+  await client.execute({
+    sql: `DELETE FROM captcha_pending WHERE chat_id = $chat_id AND user_id = $user_id`,
+    args: { chat_id: chatId, user_id: userId },
+  });
+}
+
+/**
+ * Удаляет истёкшие записи капчи и возвращает их, чтобы вызывающий мог при желании
+ * обработать заявки в Telegram (по умолчанию они просто остаются висеть).
+ */
+export async function prunePendingCaptcha(olderThanMs: number): Promise<CaptchaPending[]> {
+  // Граница включительна (<=): запись, созданную ровно на отсечке, тоже считаем
+  // истёкшей. Иначе prunePendingCaptcha(0) в тот же миллисекунд-тик не удалит её.
+  const cutoff = Date.now() - olderThanMs;
+  const res = await client.execute({
+    sql: `SELECT * FROM captcha_pending WHERE created_at <= $cutoff`,
+    args: { cutoff },
+  });
+  const rows = res.rows as unknown as CaptchaPending[];
+  if (rows.length > 0) {
+    await client.execute({
+      sql: `DELETE FROM captcha_pending WHERE created_at <= $cutoff`,
+      args: { cutoff },
+    });
+  }
+  return rows;
+}
+
+// --- Трекинг доверия новичков (модерация) ---
+
+/** Сколько чистых сообщений автор уже прислал в этот чат (0, если неизвестен). */
+export async function getSeenCount(chatId: number, userId: number): Promise<number> {
+  const res = await client.execute({
+    sql: `SELECT msg_count FROM moderation_seen WHERE chat_id = $chat_id AND user_id = $user_id`,
+    args: { chat_id: chatId, user_id: userId },
+  });
+  return Number(res.rows[0]?.msg_count ?? 0);
+}
+
+/**
+ * Учитывает ещё одно «чистое» сообщение автора: первое создаёт строку (msg_count=1),
+ * последующие инкрементят. Вызывать ТОЛЬКО для не-спама — иначе спамер «дослался»
+ * бы до статуса доверенного и обошёл модерацию.
+ */
+export async function bumpSeen(chatId: number, userId: number): Promise<void> {
+  const now = Date.now();
+  await client.execute({
+    sql: `
+      INSERT INTO moderation_seen (chat_id, user_id, msg_count, last_seen, created_at)
+      VALUES ($chat_id, $user_id, 1, $now, $now)
+      ON CONFLICT(chat_id, user_id) DO UPDATE SET
+        msg_count = msg_count + 1,
+        last_seen = $now
+    `,
+    args: { chat_id: chatId, user_id: userId, now },
+  });
+}
+
+/** Чистит трекинг старше olderThanMs (по last_seen). Возвращает число удалённых строк. */
+export async function pruneModerationSeen(olderThanMs: number): Promise<number> {
+  const res = await client.execute({
+    sql: `DELETE FROM moderation_seen WHERE last_seen < $cutoff`,
     args: { cutoff: Date.now() - olderThanMs },
   });
   return res.rowsAffected;
