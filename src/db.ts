@@ -1,8 +1,13 @@
 // Хранилище на libSQL (@libsql/client). Один клиент работает и с удалённой
 // Turso-БД (libsql://…), и с локальным файлом (file:…) для разработки — выбор
-// делает config.db. Открываем соединение, накатываем схему и отдаём
-// типизированные асинхронные функции доступа. Доступ скоупится по владельцу
-// (added_by). libSQL асинхронен, поэтому все функции возвращают Promise.
+// делает config.db. Создаём клиент, отдаём типизированные асинхронные функции
+// доступа; создание схемы и миграции вынесены в migrate() (не выполняются при
+// импорте). Доступ скоупится по владельцу (added_by). libSQL асинхронен, поэтому
+// все функции возвращают Promise.
+//
+// На Cloudflare Workers сборка подменяет "@libsql/client" на "@libsql/client/web"
+// (HTTP-клиент без нативных биндингов) через [alias] в wrangler.toml — публичный
+// API идентичен, менять импорт в коде не нужно.
 
 import { createClient } from "@libsql/client";
 import { config } from "./config.ts";
@@ -18,93 +23,107 @@ export interface Channel {
   created_at: number;
 }
 
+// Создание клиента — не I/O: соединение открывается на первом .execute(). Поэтому
+// безопасно на top-level даже в Workers (там I/O в global scope запрещён).
 const client = createClient({
   url: config.db.url,
   authToken: config.db.authToken,
 });
 
-// PRAGMA-режимы имеют смысл только для локального файла. На Turso журналирование
-// и целостность управляются платформой, и эти PRAGMA там игнорируются/недоступны.
-if (!config.db.isRemote) {
-  await client.execute("PRAGMA journal_mode = WAL");
-  await client.execute("PRAGMA foreign_keys = ON");
-}
-
-await client.execute(`
-  CREATE TABLE IF NOT EXISTS channels (
-    chat_id        INTEGER PRIMARY KEY,
-    title          TEXT,
-    type           TEXT,
-    added_by       INTEGER NOT NULL,
-    auto_approve   INTEGER NOT NULL DEFAULT 1,
-    active         INTEGER NOT NULL DEFAULT 1,
-    approved_count INTEGER NOT NULL DEFAULT 0,
-    created_at     INTEGER NOT NULL
-  )
-`);
-
-await client.execute(`
-  CREATE TABLE IF NOT EXISTS join_events (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    chat_id      INTEGER NOT NULL,
-    user_id      INTEGER NOT NULL,
-    username     TEXT,
-    decision     TEXT NOT NULL,
-    requested_at INTEGER NOT NULL,
-    created_at   INTEGER NOT NULL
-  )
-`);
-
-// --- Миграции ---
-// CREATE TABLE IF NOT EXISTS не трогает уже существующие таблицы, поэтому БД,
-// созданная старой схемой, не получит новых колонок. Догоняем её вручную ДО
-// создания индексов: иначе уникальный индекс по requested_at упадёт, а /stats —
-// на отсутствующем approved_count. Отдельного механизма миграций нет.
-
+// Набор колонок таблицы — нужен догоняющим миграциям старых БД.
 async function tableColumns(table: string): Promise<Set<string>> {
   const res = await client.execute(`PRAGMA table_info(${table})`);
   return new Set(res.rows.map((r) => String(r.name)));
 }
 
-// Журнал мигрируем первым: дедуп должен пройти ДО бэкфилла approved_count,
-// иначе счётчик впитает дубли и /stats останется завышенным навсегда.
-const joinCols = await tableColumns("join_events");
-if (!joinCols.has("requested_at")) {
-  await client.execute(`ALTER TABLE join_events ADD COLUMN requested_at INTEGER NOT NULL DEFAULT 0`);
-  // Времени подачи у старых строк нет — берём created_at как приближение, чтобы
-  // не схлопнуть всю историю пользователя в один (chat_id, user_id, 0).
-  await client.execute(`UPDATE join_events SET requested_at = created_at WHERE requested_at = 0`);
-  // Дедуп перед уникальным индексом: в старой схеме его не было, дубли возможны.
-  // Оставляем строку с минимальным id в каждой группе.
+/**
+ * Создаёт схему и догоняет старые БД миграциями. Идемпотентна.
+ *
+ * Раньше выполнялась на top-level await при импорте модуля. Вынесена в функцию,
+ * потому что на Cloudflare Workers сетевой I/O в global scope запрещён, а импорт
+ * db.ts происходит именно там. На проде (Turso) воркер migrate() НЕ вызывает —
+ * схема уже создана. Гоняется отдельно: `bun run migrate` (локально/CI) и в
+ * тестах перед проверками.
+ */
+export async function migrate(): Promise<void> {
+  // PRAGMA-режимы имеют смысл только для локального файла. На Turso журналирование
+  // и целостность управляются платформой, и эти PRAGMA там игнорируются/недоступны.
+  if (!config.db.isRemote) {
+    await client.execute("PRAGMA journal_mode = WAL");
+    await client.execute("PRAGMA foreign_keys = ON");
+  }
+
   await client.execute(`
-    DELETE FROM join_events
-    WHERE id NOT IN (
-      SELECT MIN(id) FROM join_events GROUP BY chat_id, user_id, requested_at
+    CREATE TABLE IF NOT EXISTS channels (
+      chat_id        INTEGER PRIMARY KEY,
+      title          TEXT,
+      type           TEXT,
+      added_by       INTEGER NOT NULL,
+      auto_approve   INTEGER NOT NULL DEFAULT 1,
+      active         INTEGER NOT NULL DEFAULT 1,
+      approved_count INTEGER NOT NULL DEFAULT 0,
+      created_at     INTEGER NOT NULL
     )
   `);
-}
 
-const channelCols = await tableColumns("channels");
-if (!channelCols.has("approved_count")) {
-  await client.execute(`ALTER TABLE channels ADD COLUMN approved_count INTEGER NOT NULL DEFAULT 0`);
-  // Бэкфилл all-time счётчика из уже дедуплицированного журнала одобрений.
   await client.execute(`
-    UPDATE channels SET approved_count = (
-      SELECT COUNT(*) FROM join_events
-      WHERE join_events.chat_id = channels.chat_id
-        AND join_events.decision = 'approved'
+    CREATE TABLE IF NOT EXISTS join_events (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id      INTEGER NOT NULL,
+      user_id      INTEGER NOT NULL,
+      username     TEXT,
+      decision     TEXT NOT NULL,
+      requested_at INTEGER NOT NULL,
+      created_at   INTEGER NOT NULL
     )
   `);
-}
 
-await client.execute(`CREATE INDEX IF NOT EXISTS idx_channels_added_by ON channels(added_by)`);
-await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_chat ON join_events(chat_id)`);
-await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_created ON join_events(created_at)`);
-// Идемпотентность журнала: одна и та же заявка (chat_id+user_id+время её подачи
-// в Telegram) при переобработке вебхука не задвоится.
-await client.execute(
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_join_events_unique ON join_events(chat_id, user_id, requested_at)`,
-);
+  // --- Миграции ---
+  // CREATE TABLE IF NOT EXISTS не трогает уже существующие таблицы, поэтому БД,
+  // созданная старой схемой, не получит новых колонок. Догоняем её вручную ДО
+  // создания индексов: иначе уникальный индекс по requested_at упадёт, а /stats —
+  // на отсутствующем approved_count. Отдельного механизма миграций нет.
+
+  // Журнал мигрируем первым: дедуп должен пройти ДО бэкфилла approved_count,
+  // иначе счётчик впитает дубли и /stats останется завышенным навсегда.
+  const joinCols = await tableColumns("join_events");
+  if (!joinCols.has("requested_at")) {
+    await client.execute(`ALTER TABLE join_events ADD COLUMN requested_at INTEGER NOT NULL DEFAULT 0`);
+    // Времени подачи у старых строк нет — берём created_at как приближение, чтобы
+    // не схлопнуть всю историю пользователя в один (chat_id, user_id, 0).
+    await client.execute(`UPDATE join_events SET requested_at = created_at WHERE requested_at = 0`);
+    // Дедуп перед уникальным индексом: в старой схеме его не было, дубли возможны.
+    // Оставляем строку с минимальным id в каждой группе.
+    await client.execute(`
+      DELETE FROM join_events
+      WHERE id NOT IN (
+        SELECT MIN(id) FROM join_events GROUP BY chat_id, user_id, requested_at
+      )
+    `);
+  }
+
+  const channelCols = await tableColumns("channels");
+  if (!channelCols.has("approved_count")) {
+    await client.execute(`ALTER TABLE channels ADD COLUMN approved_count INTEGER NOT NULL DEFAULT 0`);
+    // Бэкфилл all-time счётчика из уже дедуплицированного журнала одобрений.
+    await client.execute(`
+      UPDATE channels SET approved_count = (
+        SELECT COUNT(*) FROM join_events
+        WHERE join_events.chat_id = channels.chat_id
+          AND join_events.decision = 'approved'
+      )
+    `);
+  }
+
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_channels_added_by ON channels(added_by)`);
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_chat ON join_events(chat_id)`);
+  await client.execute(`CREATE INDEX IF NOT EXISTS idx_join_events_created ON join_events(created_at)`);
+  // Идемпотентность журнала: одна и та же заявка (chat_id+user_id+время её подачи
+  // в Telegram) при переобработке вебхука не задвоится.
+  await client.execute(
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_join_events_unique ON join_events(chat_id, user_id, requested_at)`,
+  );
+}
 
 // --- Каналы ---
 

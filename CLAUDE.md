@@ -7,18 +7,25 @@ Telegram-бот авто-приёма заявок на вступление в 
 
 ## Стек и запуск
 
-- **Bun + TypeScript + [grammY](https://grammy.dev) + libSQL ([@libsql/client](https://docs.turso.tech))**, апдейты через **webhook** (не long-polling). БД — Turso в проде, локальный файл SQLite (`file:…`) в разработке; клиент один и тот же, выбор делает `config.db`.
-- `bun run dev` — запуск с автоперезапуском (`bun --watch`).
-- `bun start` — обычный запуск.
+- **TypeScript + [grammY](https://grammy.dev) + libSQL ([@libsql/client](https://docs.turso.tech))**, апдейты через **webhook** (не long-polling). Хостинг — **Cloudflare Workers** (раньше был Fly.io/Bun). БД — Turso в проде, локальный файл SQLite (`file:…`) в разработке; клиент один и тот же, выбор делает `config.db`.
+- `bun run dev` — локальный воркер через `wrangler dev`.
+- `bun run deploy` — деплой воркера (`wrangler deploy`).
+- `bun run setup` — разово выставляет меню команд и вебхук Telegram на адрес из
+  `WEBHOOK_URL` (см. `scripts/setup.ts`). Запускать после деплоя / смены URL.
+- `bun run migrate` — идемпотентно накатывает схему БД (`scripts/migrate.ts`);
+  на проде обычно не нужен (схема в Turso уже есть).
+- `bun run tail` — живые логи воркера (`wrangler tail`).
 - `bunx tsc --noEmit` — проверка типов (есть `noEmit`, эмита нет — только typecheck).
 - `bun test` — тесты (`test/app.test.ts`): интеграционно проверяют поток через
   хендлеры и БД на временной SQLite (миграции, скоуп по владельцу, идемпотентность
-  журнала, команды/колбэки, регистрация на creator). `bun test --coverage` —
-  покрытие. Линтера в проекте нет.
+  журнала, команды/колбэки, регистрация на creator). Тесты сами зовут `db.migrate()`
+  перед проверками. `bun test --coverage` — покрытие. Линтера в проекте нет.
 
-Вебхуку нужен публичный HTTPS — локально поднимается туннель (`cloudflared`/`ngrok`)
-на порт 3000, его адрес кладётся в `WEBHOOK_URL`. При старте бот сам зовёт
-`setWebhook` с явным `allowed_updates`.
+В бандле воркера `@libsql/client` подменяется на `@libsql/client/web` (HTTP-клиент
+без нативных биндингов) через `[alias]` в `wrangler.toml`. Секреты и vars воркера
+доступны в `process.env` благодаря флагу `nodejs_compat`, поэтому `config.ts` не
+меняется. Вебхуку нужен публичный HTTPS — в проде это `*.workers.dev`; локально
+подними туннель (`cloudflared`/`ngrok`) и положи его адрес в `WEBHOOK_URL`.
 
 ## Конфигурация (`.env`, читается Bun автоматически)
 
@@ -48,10 +55,13 @@ src/
     chatMember.ts      my_chat_member — авто-регистрация/деактивация канала
     commands.ts        /start /help /channels /status /stats
     callbacks.ts       inline-кнопки: переключение авто-приёма
-  index.ts             Bun.serve + webhook + setWebhook на старте
+  index.ts             Worker: fetch() (webhook + /health) + scheduled() (чистка)
+scripts/
+  setup.ts             разово: setMyCommands + setWebhook
+  migrate.ts           разово: накат схемы БД
 ```
 
-Поток данных: `index.ts` (HTTP/webhook) → `bot.ts` (роутинг grammY) → хендлеры → `db.ts`.
+Поток данных: `index.ts` (fetch/webhook) → `bot.ts` (роутинг grammY) → хендлеры → `db.ts`.
 
 ## Ключевые инварианты
 
@@ -62,9 +72,10 @@ src/
   канал не регистрируется). Все пользовательские запросы фильтруются по владельцу;
   смену настроек проверяет сам SQL (`setAutoApprove` меняет строку только если
   `added_by = owner` и возвращает `changes > 0`).
-- **`allowed_updates` задаётся явно** в `src/index.ts`: `chat_join_request` и
-  `my_chat_member` НЕ входят в набор по умолчанию — без них заявки и регистрация
-  не приходят. При изменении набора апдейтов правьте здесь.
+- **`allowed_updates` задаётся явно** в `scripts/setup.ts` (при `setWebhook`):
+  `chat_join_request` и `my_chat_member` НЕ входят в набор по умолчанию — без них
+  заявки и регистрация не приходят. При изменении набора апдейтов правьте там и
+  заново гоняйте `bun run setup`.
 - **Тихий приём.** На `chat_join_request` бот молча одобряет, если канал активен
   и авто-приём включён; иначе ничего не делает (заявка остаётся висеть). Никаких
   ответов в чат.
@@ -77,8 +88,10 @@ src/
   isRemote }`: при заданном `TURSO_DATABASE_URL` — удалённая Turso, иначе
   `file:${DB_PATH}`. PRAGMA `journal_mode = WAL` и `foreign_keys = ON` ставятся
   только для локального файла (`!isRemote`) — на Turso это управляется
-  платформой. Схема + миграции прогоняются на **top-level await** в `db.ts` при
-  импорте; миграций как отдельного механизма нет.
+  платформой. Схема + миграции живут в `migrate()` в `db.ts` и НЕ выполняются при
+  импорте (на Workers сетевой I/O в global scope запрещён): их зовут `scripts/migrate.ts`
+  и тесты. На проде воркер `migrate()` не вызывает — схема в Turso уже создана.
+  Отдельного механизма версионирования миграций нет.
 - **Все функции `db.ts` асинхронные** (libSQL — async): хендлеры, `index.ts` и
   тесты обязаны их `await`-ить. Доступ к БД — `client.execute({ sql, args })` с
   именованными параметрами (`$name` в SQL, ключ `name` без префикса в `args`),

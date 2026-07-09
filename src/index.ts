@@ -1,4 +1,9 @@
-// Точка входа: поднимаем HTTP-сервер на Bun.serve и принимаем апдейты вебхуком.
+// Точка входа Cloudflare Worker.
+//   fetch()     — приём апдейтов Telegram вебхуком (POST /webhook) и /health.
+//   scheduled() — дневная чистка журнала заявок (Cron Trigger, см. wrangler.toml).
+// Воркер полностью stateless: весь стейт во внешней Turso. Разовая настройка
+// Telegram (setWebhook / setMyCommands) вынесена в scripts/setup.ts и в рантайме
+// НЕ выполняется — на Workers нет «старта», а сеть в global scope запрещена.
 
 import { webhookCallback } from "grammy";
 import { config } from "./config.ts";
@@ -10,71 +15,52 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 // в channels), журнал нужен лишь как недавняя история.
 const JOIN_EVENTS_RETENTION_MS = 90 * DAY_MS;
 
-// Важно: chat_join_request и my_chat_member НЕ входят в набор по умолчанию —
-// перечисляем их явно, иначе бот не получит заявки.
-const ALLOWED_UPDATES = [
-  "message",
-  "callback_query",
-  "chat_join_request",
-  "my_chat_member",
-] as const;
+// Апдейты Telegram заведомо небольшие; отсекаем заведомо мусорные тела до парсинга.
+const MAX_WEBHOOK_BODY = 1024 * 1024; // 1 МБ
 
-const handleUpdate = webhookCallback(bot, "std/http", {
+// grammY лениво инициализирует бота (getMe) при первом апдейте и сам проверяет
+// секретный заголовок X-Telegram-Bot-Api-Secret-Token (иначе 401).
+const handleUpdate = webhookCallback(bot, "cloudflare-mod", {
   secretToken: config.webhookSecret,
 });
 
-// Апдейты Telegram заведомо меньше; отсекаем заведомо мусорные тела до парсинга.
-// Полноценный rate-limit — задача reverse proxy перед сервисом.
-const MAX_WEBHOOK_BODY = 1024 * 1024; // 1 МБ
+// Минимальный тип контекста воркера — только то, что используем (без зависимости
+// от @cloudflare/workers-types, чтобы не конфликтовать с bun-types в тестах).
+interface ExecutionContext {
+  waitUntil(promise: Promise<unknown>): void;
+}
 
-await bot.init();
+export default {
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
 
-await bot.api.setMyCommands([
-  { command: "channels", description: "Каналы и переключение авто-приёма" },
-  { command: "status", description: "Сводка по каналам" },
-  { command: "stats", description: "Сколько заявок принято" },
-  { command: "help", description: "Справка" },
-]);
-
-await bot.api.setWebhook(`${config.webhookUrl}${config.webhookPath}`, {
-  secret_token: config.webhookSecret,
-  allowed_updates: [...ALLOWED_UPDATES],
-});
-
-const info = await bot.api.getWebhookInfo();
-console.log(`Бот @${bot.botInfo.username} запущен.`);
-console.log(`Вебхук: ${info.url}`);
-console.log(`Разрешённые апдейты: ${info.allowed_updates?.join(", ") ?? "(по умолчанию)"}`);
-console.log(`Ожидают обработки: ${info.pending_update_count}`);
-
-// Ретеншен журнала: разово на старте и далее раз в сутки.
-await pruneJoinEvents(JOIN_EVENTS_RETENTION_MS);
-setInterval(async () => {
-  const removed = await pruneJoinEvents(JOIN_EVENTS_RETENTION_MS);
-  if (removed > 0) console.log(`Очищено старых записей журнала: ${removed}`);
-}, DAY_MS);
-
-const server = Bun.serve({
-  port: config.port,
-  async fetch(req) {
-    const url = new URL(req.url);
-    if (req.method === "POST" && url.pathname === config.webhookPath) {
-      const contentLength = Number(req.headers.get("content-length") ?? 0);
+    if (request.method === "POST" && url.pathname === config.webhookPath) {
+      const contentLength = Number(request.headers.get("content-length") ?? 0);
       if (contentLength > MAX_WEBHOOK_BODY) {
         return new Response("payload too large", { status: 413 });
       }
       try {
-        return await handleUpdate(req);
+        return await handleUpdate(request);
       } catch (err) {
         console.error("Ошибка обработки вебхука:", err);
         return new Response("error", { status: 500 });
       }
     }
+
     if (url.pathname === "/health") {
       return new Response("ok");
     }
+
     return new Response("not found", { status: 404 });
   },
-});
 
-console.log(`HTTP-сервер слушает порт ${server.port}, путь ${config.webhookPath}`);
+  // Cron Trigger: раз в сутки чистим журнал заявок старше ретеншена. waitUntil
+  // держит воркер живым до конца удаления, не блокируя возврат из хендлера.
+  async scheduled(_event: unknown, _env: unknown, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      pruneJoinEvents(JOIN_EVENTS_RETENTION_MS).then((removed) => {
+        if (removed > 0) console.log(`Очищено старых записей журнала: ${removed}`);
+      }),
+    );
+  },
+};

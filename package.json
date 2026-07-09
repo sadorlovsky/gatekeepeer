@@ -5,8 +5,12 @@
   "type": "module",
   "module": "src/index.ts",
   "scripts": {
-    "dev": "bun --watch src/index.ts",
-    "start": "bun src/index.ts",
+    "dev": "bunx wrangler dev",
+    "deploy": "bunx wrangler deploy",
+    "tail": "bunx wrangler tail",
+    "setup": "bun scripts/setup.ts",
+    "migrate": "bun scripts/migrate.ts",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test"
   },
   "dependencies": {
