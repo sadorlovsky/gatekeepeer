@@ -17,8 +17,7 @@ crons = ["0 3 * * *"]
 
 # WEBHOOK_URL воркеру в рантайме не нужен (его читает только scripts/setup.ts),
 # но config.ts требует переменную при импорте — держим публичный адрес здесь.
-# ЗАМЕНИТЬ на реальный workers.dev-адрес после первого деплоя.
 # Секреты (BOT_TOKEN, WEBHOOK_SECRET, TURSO_DATABASE_URL, TURSO_AUTH_TOKEN)
 # задаются через `wrangler secret put`, НЕ здесь.
 [vars]
-WEBHOOK_URL = "https://gatekeepeer.workers.dev"
+WEBHOOK_URL = "https://gatekeepeer.flog.workers.dev"
