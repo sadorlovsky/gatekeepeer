@@ -69,9 +69,10 @@ bun run dev            # вебхуку нужен публичный HTTPS
 ```
 
 В разработке БД — локальный SQLite-файл; для прода задайте `TURSO_DATABASE_URL`
-и `TURSO_AUTH_TOKEN`. Деплой — Fly.io + Turso, подробности в
-[`fly.toml`](./fly.toml) и [`Dockerfile`](./Dockerfile).
+и `TURSO_AUTH_TOKEN`. Деплой — **Cloudflare Workers + Turso**: `bun run deploy`,
+затем разово `bun run setup` (ставит вебхук и меню команд). Конфиг воркера —
+[`wrangler.toml`](./wrangler.toml).
 
-Команды: `bun start`, `bun test`, `bunx tsc --noEmit`.
+Команды: `bun run deploy`, `bun run setup`, `bun test`, `bunx tsc --noEmit`.
 
 </details>

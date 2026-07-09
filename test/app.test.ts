@@ -110,6 +110,9 @@ beforeAll(async () => {
 
   seedLegacyDb();
   db = await import("../src/db.ts");
+  // Схема/миграции больше не выполняются при импорте db.ts (см. комментарий в
+  // db.ts про global scope на Workers) — накатываем их явно поверх legacy-БД.
+  await db.migrate();
   commandsModule = await import("../src/handlers/commands.ts");
   callbacksModule = await import("../src/handlers/callbacks.ts");
   joinRequestModule = await import("../src/handlers/joinRequest.ts");

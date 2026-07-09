@@ -1,0 +1,24 @@
+name = "gatekeepeer"
+main = "src/index.ts"
+compatibility_date = "2026-07-01"
+# nodejs_compat: даёт process/process.env. Секреты и vars воркера автоматически
+# попадают в process.env, поэтому src/config.ts работает без изменений.
+compatibility_flags = ["nodejs_compat"]
+
+# В бандле воркера подменяем нативный libSQL-клиент на HTTP-вариант без нативных
+# биндингов. Локальная разработка и тесты (bun) продолжают тянуть "@libsql/client"
+# с file:-БД — publiс API идентичен.
+[alias]
+"@libsql/client" = "@libsql/client/web"
+
+# Дневная чистка журнала заявок → scheduled() в src/index.ts. Время в UTC.
+[triggers]
+crons = ["0 3 * * *"]
+
+# WEBHOOK_URL воркеру в рантайме не нужен (его читает только scripts/setup.ts),
+# но config.ts требует переменную при импорте — держим публичный адрес здесь.
+# ЗАМЕНИТЬ на реальный workers.dev-адрес после первого деплоя.
+# Секреты (BOT_TOKEN, WEBHOOK_SECRET, TURSO_DATABASE_URL, TURSO_AUTH_TOKEN)
+# задаются через `wrangler secret put`, НЕ здесь.
+[vars]
+WEBHOOK_URL = "https://gatekeepeer.workers.dev"
