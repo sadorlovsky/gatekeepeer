@@ -32,7 +32,6 @@ Telegram-бот авто-приёма заявок на вступление в 
 - `BOT_TOKEN` — токен от BotFather (обязателен).
 - `WEBHOOK_URL` — публичный https-адрес (обязателен).
 - `WEBHOOK_SECRET` — секрет для проверки апдейтов (обязателен).
-- `PORT` — порт HTTP-сервера, по умолчанию `3000`.
 - `TURSO_DATABASE_URL` — адрес Turso-БД (`libsql://…`). Если задан — работаем с
   Turso; иначе откатываемся на локальный файл из `DB_PATH`.
 - `TURSO_AUTH_TOKEN` — токен Turso. Обязателен, когда `TURSO_DATABASE_URL` —
@@ -55,9 +54,10 @@ src/
     chatMember.ts      my_chat_member — авто-регистрация/деактивация канала
     commands.ts        /start /help /channels /status /stats
     callbacks.ts       inline-кнопки: переключение авто-приёма
-  index.ts             Worker: fetch() (webhook + /health) + scheduled() (чистка)
+  telegram.ts          обвязка Telegram: configureTelegram (команды + вебхук), ALLOWED_UPDATES
+  index.ts             Worker: fetch() (webhook + /health) + scheduled() (чистка + само-восстановление)
 scripts/
-  setup.ts             разово: setMyCommands + setWebhook
+  setup.ts             разово: configureTelegram (setMyCommands + setWebhook)
   migrate.ts           разово: накат схемы БД
 ```
 
@@ -72,10 +72,19 @@ scripts/
   канал не регистрируется). Все пользовательские запросы фильтруются по владельцу;
   смену настроек проверяет сам SQL (`setAutoApprove` меняет строку только если
   `added_by = owner` и возвращает `changes > 0`).
-- **`allowed_updates` задаётся явно** в `scripts/setup.ts` (при `setWebhook`):
-  `chat_join_request` и `my_chat_member` НЕ входят в набор по умолчанию — без них
-  заявки и регистрация не приходят. При изменении набора апдейтов правьте там и
-  заново гоняйте `bun run setup`.
+- **`allowed_updates` задаётся явно** в `src/telegram.ts` (`ALLOWED_UPDATES`, при
+  `setWebhook`): `chat_join_request` и `my_chat_member` НЕ входят в набор по
+  умолчанию — без них заявки и регистрация не приходят. Один источник правды:
+  `configureTelegram` зовут и `scripts/setup.ts` (разово), и `scheduled()` в
+  `index.ts` (ежедневно, для само-восстановления). При изменении набора правьте
+  `telegram.ts`; на прод он доедет со следующим деплоем или ночным крон-запуском,
+  но для немедленного эффекта прогоните `bun run setup`.
+- **Само-восстановление обвязки Telegram.** У воркера нет «старта», поэтому вебхук
+  и команды не переустанавливаются на каждый запуск (в отличие от старой
+  Bun-версии). Чтобы бот не «замолчал» навсегда после `/revoke` токена или
+  забытого `bun run setup`, ежедневный `scheduled()` идемпотентно вызывает
+  `configureTelegram`. Восстановление занимает до суток; для немедленного —
+  `bun run setup`.
 - **Тихий приём.** На `chat_join_request` бот молча одобряет, если канал активен
   и авто-приём включён; иначе ничего не делает (заявка остаётся висеть). Никаких
   ответов в чат.
@@ -89,9 +98,11 @@ scripts/
   `file:${DB_PATH}`. PRAGMA `journal_mode = WAL` и `foreign_keys = ON` ставятся
   только для локального файла (`!isRemote`) — на Turso это управляется
   платформой. Схема + миграции живут в `migrate()` в `db.ts` и НЕ выполняются при
-  импорте (на Workers сетевой I/O в global scope запрещён): их зовут `scripts/migrate.ts`
-  и тесты. На проде воркер `migrate()` не вызывает — схема в Turso уже создана.
-  Отдельного механизма версионирования миграций нет.
+  импорте (на Workers сетевой I/O в global scope запрещён): их зовут `scripts/migrate.ts`,
+  тесты и сам воркер лениво через `ensureSchema()` — мемоизированный вызов `migrate()`
+  один раз на изолят, из хендлеров `fetch`/`scheduled` (не при импорте). Так пустая
+  или отставшая по схеме Turso-БД догоняется на первом же запросе, а не падает с
+  «no such table». Отдельного механизма версионирования миграций нет.
 - **Все функции `db.ts` асинхронные** (libSQL — async): хендлеры, `index.ts` и
   тесты обязаны их `await`-ить. Доступ к БД — `client.execute({ sql, args })` с
   именованными параметрами (`$name` в SQL, ключ `name` без префикса в `args`),
