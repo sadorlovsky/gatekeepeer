@@ -53,7 +53,6 @@ export const config = {
   botToken: required("BOT_TOKEN"),
   webhookUrl: required("WEBHOOK_URL").replace(/\/+$/, ""),
   webhookSecret: requiredSecret("WEBHOOK_SECRET"),
-  port: Number(process.env.PORT ?? 3000),
   db: buildDbConfig(),
   // Путь, по которому сервер принимает апдейты от Telegram.
   webhookPath: "/webhook",

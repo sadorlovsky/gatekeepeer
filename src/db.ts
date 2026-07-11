@@ -41,9 +41,8 @@ async function tableColumns(table: string): Promise<Set<string>> {
  *
  * Раньше выполнялась на top-level await при импорте модуля. Вынесена в функцию,
  * потому что на Cloudflare Workers сетевой I/O в global scope запрещён, а импорт
- * db.ts происходит именно там. На проде (Turso) воркер migrate() НЕ вызывает —
- * схема уже создана. Гоняется отдельно: `bun run migrate` (локально/CI) и в
- * тестах перед проверками.
+ * db.ts происходит именно там. Гоняется явно: `bun run migrate` (локально/CI),
+ * в тестах перед проверками и лениво воркером на холодном старте (ensureSchema).
  */
 export async function migrate(): Promise<void> {
   // PRAGMA-режимы имеют смысл только для локального файла. На Turso журналирование
@@ -123,6 +122,22 @@ export async function migrate(): Promise<void> {
   await client.execute(
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_join_events_unique ON join_events(chat_id, user_id, requested_at)`,
   );
+}
+
+// Ленивая гарантия схемы для воркера: migrate() один раз на изолят. В global
+// scope Workers сеть запрещена, поэтому зовём из хендлеров (fetch/scheduled), а
+// не при импорте. Мемоизируем промис, чтобы не гонять миграции на каждый апдейт;
+// при ошибке сбрасываем кэш, чтобы следующий запрос повторил попытку.
+let schemaReady: Promise<void> | null = null;
+
+export function ensureSchema(): Promise<void> {
+  if (!schemaReady) {
+    schemaReady = migrate().catch((err) => {
+      schemaReady = null;
+      throw err;
+    });
+  }
+  return schemaReady;
 }
 
 // --- Каналы ---

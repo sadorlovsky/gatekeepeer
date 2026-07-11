@@ -9,31 +9,11 @@
 // .env). WEBHOOK_URL должен указывать на воркер, напр. https://<...>.workers.dev.
 // БД скрипту не нужна — импорт bot.ts лишь создаёт libSQL-клиент, но не ходит в неё.
 
-import { config } from "../src/config.ts";
 import { bot } from "../src/bot.ts";
-
-// chat_join_request и my_chat_member НЕ входят в набор по умолчанию —
-// перечисляем явно, иначе бот не получит заявки и события о правах.
-const ALLOWED_UPDATES = [
-  "message",
-  "callback_query",
-  "chat_join_request",
-  "my_chat_member",
-] as const;
+import { configureTelegram } from "../src/telegram.ts";
 
 await bot.init();
-
-await bot.api.setMyCommands([
-  { command: "channels", description: "Каналы и переключение авто-приёма" },
-  { command: "status", description: "Сводка по каналам" },
-  { command: "stats", description: "Сколько заявок принято" },
-  { command: "help", description: "Справка" },
-]);
-
-await bot.api.setWebhook(`${config.webhookUrl}${config.webhookPath}`, {
-  secret_token: config.webhookSecret,
-  allowed_updates: [...ALLOWED_UPDATES],
-});
+await configureTelegram(bot);
 
 const info = await bot.api.getWebhookInfo();
 console.log(`Бот @${bot.botInfo.username}`);
